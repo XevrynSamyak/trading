@@ -25,7 +25,9 @@ paper mode, and it stops on its own before losing more than you allow.
 - Turning crypto profit back into bank money goes through an exchange with
   identity checks (KYC). You do that step by hand; the monthly report tells
   you how much surplus there is.
-- Starting on free tiers (see `deploy/SETUP.md`) keeps the bills near $0.
+- Running it on an Android phone (see `deploy/ANDROID.md`) with a free RPC
+  key keeps the bills at $0 and needs no card. `deploy/SETUP.md` covers a
+  cloud server (Oracle free tier) if you get one later.
 
 ## What it does each cycle
 
@@ -54,6 +56,10 @@ on losses:
 | `SUSTAIN_STOP_AFTER_MONTHS` | 2 | Retires if it didn't cover its bills 2 months running |
 
 ## Running
+
+**On an Android phone (free):** follow `deploy/ANDROID.md`.
+
+On any computer with Node 20+:
 
 ```bash
 npm install
