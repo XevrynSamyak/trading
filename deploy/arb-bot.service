@@ -1,0 +1,17 @@
+[Unit]
+Description=Solana arbitrage bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/trading
+EnvironmentFile=/home/ubuntu/trading/.env
+ExecStart=/usr/bin/npx tsx src/index.ts
+# Restart on crashes, but not after a deliberate halt (exit code 0).
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
