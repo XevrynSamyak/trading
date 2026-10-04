@@ -83,11 +83,15 @@ simulated first, for free, so doomed attempts are never sent.
 ## Speed and API limits
 
 Prices come from Jupiter, which allows **30 requests/min without a key** and
-**60 with a free key** (`JUPITER_API_KEY`). Each scan uses 6 requests, so the
-bot scans at most ~3.7 times a minute without a key and ~8.7 with one; it
-paces itself to never exceed the limit in any 60-second window. Wallet
-balances (Helius) are read at most once a minute to stay well inside the free
-RPC plan.
+**60 with a free key** (`JUPITER_API_KEY`). Checking one token costs 2
+requests, so a full scan of 3 tokens costs 6. The bot counts every request in
+a sliding 60-second window and never exceeds the limit.
+
+With the free key that is ~9 full scans a minute. When a token is moving fast
+or a gap is nearly big enough, the bot switches to **focus scans** of just
+that token (2 requests), re-checking it about every 2 seconds, with a full
+scan every third time so nothing else is ignored. Wallet balances (Helius)
+are read at most once a minute to stay well inside the free RPC plan.
 
 ## Limits
 

@@ -57,10 +57,11 @@ describe("Brain: smarter skills", () => {
   });
 
   it("scans faster when a gap is close and slower when nothing is", () => {
-    const b = new Brain(tmp(), { baseMinProfitBps: 20 });
-    expect(b.nextIntervalMs(18, 15_000, 0)).toBe(8_000); // 2bps short -> fast (clamped to 8s)
-    expect(b.nextIntervalMs(5, 15_000, 0)).toBe(15_000);
-    expect(b.nextIntervalMs(-50, 15_000, 0)).toBe(22_500); // far away -> slow down
+    const b = new Brain(tmp(), { baseMinProfitBps: 20, minMsPerRequest: 1_000 });
+    // A full scan is 6 requests at the learned 1333ms each = ~8s minimum.
+    expect(b.nextIntervalMs(18, 15_000, 0, 0, 6)).toBe(7_998); // near a gap: 7.5s, held to the pace
+    expect(b.nextIntervalMs(5, 15_000, 0, 0, 6)).toBe(15_000);
+    expect(b.nextIntervalMs(-50, 15_000, 0, 0, 6)).toBe(22_500); // far away -> slow down
   });
 
   it("learns which hours are good", () => {
@@ -187,24 +188,69 @@ describe("Brain: reality checks, sudden moves, and thoughts", () => {
 });
 
 describe("Brain: learns the fastest safe scan pace", () => {
-  it("speeds up after clean scans, slows down on a rate limit, never below the minimum", () => {
-    const b = new Brain(tmp(), { baseMinProfitBps: 20, minIntervalMs: 2_000 });
-    expect(b.paceFloorMs).toBe(8_000);
+  it("speeds up after clean scans, slows down on a rate limit, never below the budget", () => {
+    const b = new Brain(tmp(), { baseMinProfitBps: 20, minMsPerRequest: 1_035 });
+    expect(b.msPerRequest).toBe(1_333);
     for (let i = 0; i < 10; i++) b.observePace(false);
-    expect(b.paceFloorMs).toBe(7_200);
+    expect(b.msPerRequest).toBe(1_200);
     b.observePace(true);
-    expect(b.paceFloorMs).toBe(14_400);
+    expect(b.msPerRequest).toBe(2_400);
     for (let i = 0; i < 500; i++) b.observePace(false);
-    expect(b.paceFloorMs).toBe(2_000);
-    expect(b.nextIntervalMs(5, 5_000, 0)).toBe(5_000);
-    expect(b.nextIntervalMs(18, 5_000, 0)).toBe(2_500); // near a gap: faster
+    expect(b.msPerRequest).toBe(1_035); // the even spacing for 60 requests/min
+    expect(b.scanPaceMs(6)).toBe(6_210); // full scan
+    expect(b.scanPaceMs(2)).toBe(2_070); // focus scan of one token
   });
 
-  it("remembers its pace across restarts", () => {
+  it("remembers its pace across restarts, and converts an older brain's per-scan pace", () => {
     const path = tmp();
     const b = new Brain(path, { baseMinProfitBps: 20 });
     b.observePace(true);
     b.save();
-    expect(new Brain(path, { baseMinProfitBps: 20 }).paceFloorMs).toBe(16_000);
+    expect(new Brain(path, { baseMinProfitBps: 20 }).msPerRequest).toBe(2_666);
+
+    const old = tmp();
+    writeFileSync(old, JSON.stringify({ tokens: {}, minProfitBps: 20, totalScans: 0, paceFloorMs: 12_800 }));
+    const upgraded = new Brain(old, { baseMinProfitBps: 20 });
+    expect(upgraded.msPerRequest).toBeCloseTo(2_133.3, 1);
+    expect("paceFloorMs" in upgraded.state).toBe(false);
+  });
+});
+
+describe("Brain: focus mode", () => {
+  const T0 = Date.parse("2026-10-04T14:00:00Z");
+  const all = { A: "a", B: "b", C: "c", D: "d" };
+
+  it("re-checks a moving token on its own twice, then does a full scan, while it stays hot", () => {
+    const b = new Brain(tmp(), { baseMinProfitBps: 20, exploreRate: 0, minMsPerRequest: 1_035 });
+    for (let i = 0; i < 6; i++) b.observePace(false); // (not enough to change pace)
+    b.observePrice("D", 1, 100, T0);
+    b.observePrice("D", 1, 101, T0 + 5_000); // +1% in 5s -> hot
+    const t = T0 + 6_000;
+    expect(b.plannedRequests(t)).toBe(2);
+    expect(Object.keys(b.pickTokens(all, t))).toEqual(["D"]);
+    expect(Object.keys(b.pickTokens(all, t))).toEqual(["D"]);
+    expect(b.plannedRequests(t)).toBe(6);
+    expect(Object.keys(b.pickTokens(all, t))).toHaveLength(3); // full scan, D included first
+    expect(Object.keys(b.pickTokens(all, t))).toEqual(["D"]); // focus again
+    // a focus scan can follow ~3x sooner than a full one
+    expect(b.nextIntervalMs(-3, 1_000, 0, t, 2)).toBe(2_666);
+    expect(b.nextIntervalMs(-3, 1_000, 0, t, 6)).toBe(7_998);
+  });
+
+  it("focuses on a token whose gap is nearly big enough, for a minute", () => {
+    const b = new Brain(tmp(), { baseMinProfitBps: 20, exploreRate: 0 });
+    b.observeCycle(16, "B", T0); // 4bps short of the 20bps bar
+    expect(b.isHot("B", T0 + 59_000)).toBe(true);
+    expect(Object.keys(b.pickTokens(all, T0 + 1_000))).toEqual(["B"]);
+    expect(b.isHot("B", T0 + 61_000)).toBe(false);
+    b.observeCycle(10, "C", T0); // 10bps short: not close enough
+    expect(b.isHot("C", T0 + 1_000)).toBe(false);
+    expect(b.state.hotEvents).toBe(0); // near-gaps are not counted as price-move events
+  });
+
+  it("does normal scans when nothing is hot", () => {
+    const b = new Brain(tmp(), { baseMinProfitBps: 20, exploreRate: 0 });
+    expect(b.plannedRequests(T0)).toBe(6);
+    expect(Object.keys(b.pickTokens(all, T0))).toHaveLength(3);
   });
 });

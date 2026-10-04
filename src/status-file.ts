@@ -19,8 +19,14 @@ export interface LiveStatus {
   lastBest?: { symbol: string; netBps: number; expectedBps: number; needBps: number };
   hot: string[];
   nextScanInMs: number;
-  /** Fastest safe pace the brain has learned (ms between scans). */
+  /** Fastest safe pace the brain has learned for a full scan (ms). */
   paceFloorMs?: number;
+  /** Tokens getting focus scans right now (moving fast or nearly a gap). */
+  focus?: string[];
+  /** Jupiter requests sent in the last 60s, and the per-minute limit. */
+  jupiterUsed?: number;
+  jupiterLimit?: number;
+  scansLastMin?: number;
 }
 
 export function writeStatus(path: string, status: LiveStatus): void {

@@ -14,6 +14,8 @@ import { dirname } from "node:path";
  *  - how much each token's quotes overstate reality -> discounts its quotes by that
  *  - sudden price moves (when gaps tend to appear) -> watches that token closely
  *  - how fast the free price API lets it scan -> runs as fast as is safe
+ *  - where to spend its limited requests -> when a token is moving or a gap is
+ *    nearly big enough, it re-checks just that token every couple of seconds
  * It also explains what it noticed in plain language (thoughts()).
  * State is saved to disk so it keeps what it learned across restarts.
  */
@@ -63,8 +65,8 @@ export interface BrainState {
   startedAt: number;
   /** The closest it has come to a profitable gap. */
   bestGap: Moment | null;
-  /** Fastest scan pace (ms between scans) that hasn't hit the API rate limit. */
-  paceFloorMs: number;
+  /** Safe spacing per Jupiter request (ms) learned so far; a scan costs 2 per token. */
+  msPerRequest: number;
   /** Sudden price moves it reacted to. */
   hotEvents: number;
   lastHot: Moment | null;
@@ -81,6 +83,8 @@ export interface BrainOptions {
   exploreRate?: number;
   /** Scan interval bounds for adaptive pacing (min = the absolute fastest it may ever go). */
   minIntervalMs?: number;
+  /** Even spacing per request that uses the whole API budget; the pace never goes below it. */
+  minMsPerRequest?: number;
   maxIntervalMs?: number;
   random?: () => number;
 }
@@ -94,8 +98,15 @@ const PRUNE_AFTER_SCANS = 50;
 const PRUNE_BELOW_BPS = -30;
 const HAIRCUT_SMOOTHING = 0.3;
 /** Pace learning: start here, speed up 10% after this many clean scans, halve speed on a rate limit. */
-const START_PACE_MS = 8_000;
+const START_MS_PER_REQUEST = 1_333;
+const MAX_MS_PER_REQUEST = 10_000;
 const CLEAN_SCANS_TO_SPEED_UP = 10;
+/** Focus mode: up to this many focus scans in a row, then one full scan so nothing is ignored. */
+const FOCUS_TURNS = 2;
+const FOCUS_MAX_TOKENS = 2;
+/** A best gap within this many bps of the bar puts that token in focus for a minute. */
+const NEAR_GAP_BPS = 5;
+const NEAR_GAP_FOCUS_MS = 60_000;
 /** A move this big (bps) between two scans of a token marks it "hot". */
 const HOT_MOVE_BPS = 30;
 /** ...if the two scans were at most this far apart. */
@@ -124,6 +135,7 @@ export class Brain {
   private lastRate = new Map<string, { rate: number; at: number }>();
   private hotUntil = new Map<string, number>();
   private cleanScans = 0;
+  private focusTurns = 0;
 
   constructor(
     private readonly path: string,
@@ -134,7 +146,8 @@ export class Brain {
       maxBps: opts.baseMinProfitBps * 4,
       tokensPerCycle: 3,
       exploreRate: 0.2,
-      minIntervalMs: 2_000,
+      minIntervalMs: 1_000,
+      minMsPerRequest: 1_000,
       maxIntervalMs: 60_000,
       random: Math.random,
       ...opts,
@@ -151,10 +164,16 @@ export class Brain {
       edgeHistogram: loaded?.edgeHistogram ?? {},
       startedAt: loaded?.startedAt ?? Date.now(),
       bestGap: loaded?.bestGap ?? null,
-      paceFloorMs: loaded?.paceFloorMs ?? START_PACE_MS,
+      // Older brains stored a pace per 6-request scan; convert it.
+      msPerRequest:
+        loaded?.msPerRequest ??
+        ((loaded as { paceFloorMs?: number } | null)?.paceFloorMs
+          ? (loaded as { paceFloorMs: number }).paceFloorMs / 6
+          : START_MS_PER_REQUEST),
       hotEvents: loaded?.hotEvents ?? 0,
       lastHot: loaded?.lastHot ?? null,
     };
+    delete (this.state as { paceFloorMs?: number }).paceFloorMs;
     for (const s of Object.values(this.state.tokens)) {
       s.sizes ??= {};
       s.phantoms ??= 0;
@@ -232,12 +251,22 @@ export class Brain {
     return s.avgEdgeBps + curiosity + 10 * reliability;
   }
 
-  /** Picks which tokens to scan this cycle. Hot tokens (sudden moves) go first. */
+  /**
+   * Picks which tokens to scan this cycle. While a token is hot (sudden move,
+   * or a gap nearly big enough) it gets focus scans of just itself, which cost
+   * a third of the requests and so can run about 3x as often; every third
+   * scan is a full one so nothing else is ignored.
+   */
   pickTokens(all: Record<string, string>, now = Date.now()): Record<string, string> {
     const symbols = Object.keys(all);
     const n = Math.min(this.opts.tokensPerCycle, symbols.length);
     const ranked = [...symbols].sort((a, b) => this.score(b) - this.score(a));
     const hot = ranked.filter((s) => this.isHot(s, now));
+    if (hot.length && this.focusTurns < FOCUS_TURNS) {
+      this.focusTurns += 1;
+      return Object.fromEntries(hot.slice(0, FOCUS_MAX_TOKENS).map((s) => [s, all[s]]));
+    }
+    this.focusTurns = 0;
     const chosen = [...hot, ...ranked.filter((s) => !hot.includes(s))].slice(0, n);
     if (hot.length < n && this.opts.random() < this.opts.exploreRate && symbols.length > n) {
       const rest = ranked.filter((s) => !chosen.includes(s));
@@ -350,6 +379,17 @@ export class Brain {
     if (!this.state.bestGap || bestNetBps > this.state.bestGap.bps) {
       this.state.bestGap = { symbol, bps: Math.round(bestNetBps * 10) / 10, at: now };
     }
+    // Nearly there: watch this token closely for a minute.
+    if (symbol !== "?" && bestNetBps >= this.minProfitBps - NEAR_GAP_BPS) {
+      this.hotUntil.set(symbol, Math.max(this.hotUntil.get(symbol) ?? 0, now + NEAR_GAP_FOCUS_MS));
+    }
+  }
+
+  /** Whether the next scan will be a focus scan, and of how many tokens. */
+  plannedRequests(now = Date.now()): number {
+    const hot = this.hotSymbols(now).length;
+    const focus = hot > 0 && this.focusTurns < FOCUS_TURNS;
+    return 2 * (focus ? Math.min(hot, FOCUS_MAX_TOKENS) : this.opts.tokensPerCycle);
   }
 
   /** Learns from a trade outcome and adjusts how picky it is. */
@@ -396,6 +436,7 @@ export class Brain {
     baseMs: number,
     hour = new Date().getUTCHours(),
     now = Date.now(),
+    requests = this.plannedRequests(now),
   ): number {
     let factor = 1;
     if ([...this.hotUntil.values()].some((until) => until > now)) factor *= 0.6;
@@ -407,7 +448,7 @@ export class Brain {
     const good = this.isGoodHour(hour);
     if (good === true) factor *= 0.8;
     else if (good === false) factor *= 1.25;
-    return Math.round(Math.min(this.opts.maxIntervalMs, Math.max(this.paceFloorMs, baseMs * factor)));
+    return Math.round(Math.min(this.opts.maxIntervalMs, Math.max(this.scanPaceMs(requests), baseMs * factor)));
   }
 
   // ---- how fast to scan ---------------------------------------------------
@@ -420,18 +461,29 @@ export class Brain {
   observePace(rateLimited: boolean): void {
     if (rateLimited) {
       this.cleanScans = 0;
-      this.state.paceFloorMs = Math.min(this.opts.maxIntervalMs, this.state.paceFloorMs * 2);
+      this.state.msPerRequest = Math.min(MAX_MS_PER_REQUEST, this.state.msPerRequest * 2);
       return;
     }
     this.cleanScans += 1;
     if (this.cleanScans >= CLEAN_SCANS_TO_SPEED_UP) {
       this.cleanScans = 0;
-      this.state.paceFloorMs = Math.max(this.opts.minIntervalMs, Math.round(this.state.paceFloorMs * 0.9));
+      this.state.msPerRequest = Math.max(this.opts.minMsPerRequest, Math.round(this.state.msPerRequest * 0.9));
     }
   }
 
+  /** Learned safe spacing per request, never below the budget's even spacing. */
+  get msPerRequest(): number {
+    return Math.max(this.opts.minMsPerRequest, this.state.msPerRequest);
+  }
+
+  /** Time a scan of `requests` requests needs at the learned safe pace. */
+  scanPaceMs(requests: number): number {
+    return Math.max(this.opts.minIntervalMs, Math.round(requests * this.msPerRequest));
+  }
+
+  /** Pace of a full scan (all tokens), for display. */
   get paceFloorMs(): number {
-    return Math.max(this.opts.minIntervalMs, this.state.paceFloorMs);
+    return this.scanPaceMs(this.opts.tokensPerCycle * 2);
   }
 
   // ---- reporting ----------------------------------------------------------

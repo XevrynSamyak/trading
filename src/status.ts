@@ -99,11 +99,16 @@ export function renderStatus(i: StatusInput): string {
           `${closeness >= 1 ? green(bar(1, 12)) : bar(closeness, 12)} ${dim("how close")}`,
       );
     }
-    if (live.paceFloorMs) {
+    if (live.scansLastMin !== undefined && live.jupiterLimit) {
       out.push(
-        `Speed:   ~${(60_000 / Math.max(live.paceFloorMs, live.nextScanInMs || live.paceFloorMs)).toFixed(1)} scans/min ` +
-          dim(`(fastest safe pace learned so far: every ${(live.paceFloorMs / 1000).toFixed(1)}s)`),
+        `Speed:   ${live.scansLastMin} scans in the last minute  ` +
+          dim(`(Jupiter: ${live.jupiterUsed ?? 0}/${live.jupiterLimit} requests used per minute)`),
       );
+    } else if (live.paceFloorMs) {
+      out.push(`Speed:   ~${(60_000 / live.paceFloorMs).toFixed(1)} scans/min`);
+    }
+    if (live.focus?.length) {
+      out.push(`Focus:   ${yellow(live.focus.join(", "))} ${dim("(re-checking just this every few seconds)")}`);
     }
     if (live.hot.length) out.push(`Hot:     ${yellow(live.hot.join(", "))} ${dim("(sudden price moves)")}`);
     out.push(

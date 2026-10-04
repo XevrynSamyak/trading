@@ -1,5 +1,5 @@
 import { Connection, PublicKey } from "@solana/web3.js";
-import { loadConfig } from "./config.js";
+import { loadConfig, maxScansPerMin } from "./config.js";
 import { JitoClient } from "./jito.js";
 import { JupiterClient } from "./jupiter.js";
 import { fetchSolPriceUsd } from "./scanner.js";
@@ -51,7 +51,7 @@ async function main() {
       const keyNote = cfg.jupiterApiKey ? "with your API key" : "no API key";
       return (
         `SOL = $${solPrice.toFixed(2)} (${keyNote}: ${cfg.jupiterRpm} requests/min, ` +
-        `up to ~${(60_000 / cfg.minScanIntervalMs).toFixed(1)} scans/min)`
+        `up to ~${maxScansPerMin(cfg.jupiterMsPerRequest).toFixed(1)} full scans/min)`
       );
     }),
   ];

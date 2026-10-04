@@ -2,7 +2,8 @@ import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Connection, PublicKey, type Keypair } from "@solana/web3.js";
 import { Brain, type SizeBucket } from "./brain.js";
-import { TOKENS_PER_SCAN, extraFeeLamports, loadConfig, tradeSizeUsd } from "./config.js";
+import { RequestBudget, budgetedFetch } from "./budget.js";
+import { TOKENS_PER_SCAN, extraFeeLamports, loadConfig, maxScansPerMin, tradeSizeUsd } from "./config.js";
 import { discoverTokens } from "./discovery.js";
 import { liveExecute, paperExecute, simulateExecute, type ExecResult } from "./executor.js";
 import { JitoClient } from "./jito.js";
@@ -43,7 +44,11 @@ async function main() {
     process.exit(1);
   }
 
-  const jup = new JupiterClient(cfg.jupiterApi, fetch, cfg.jupiterApiKey);
+  // Every Jupiter request goes through one counter, so no 60s window ever exceeds the limit
+  // (2 requests of slack, since network delays can bunch requests up on Jupiter's side).
+  const budget = new RequestBudget(Math.max(1, cfg.jupiterRpm - 2));
+  const jupFetch = budgetedFetch(budget);
+  const jup = new JupiterClient(cfg.jupiterApi, jupFetch, cfg.jupiterApiKey);
   const conn = new Connection(cfg.rpcUrl, "confirmed");
   const wallet: Keypair | undefined = cfg.walletSecretKey ? loadKeypair(cfg.walletSecretKey) : undefined;
   // Paper mode only needs the public address to test trades on-chain.
@@ -53,6 +58,7 @@ async function main() {
   const brain = new Brain(join(cfg.dataDir, `brain-${cfg.mode}.json`), {
     baseMinProfitBps: cfg.minProfitBps,
     minIntervalMs: cfg.minScanIntervalMs,
+    minMsPerRequest: cfg.jupiterMsPerRequest,
     tokensPerCycle: TOKENS_PER_SCAN,
   });
   const balanceCache = owner ? new BalanceCache(conn, owner) : undefined;
@@ -99,6 +105,11 @@ async function main() {
   const statusPath = join(cfg.dataDir, "status.json");
   const startedAt = Date.now();
   let cycles = 0;
+  const scanTimes: number[] = [];
+  const scansInLastMinute = () => {
+    while (scanTimes.length && scanTimes[0] <= Date.now() - 60_000) scanTimes.shift();
+    return scanTimes.length;
+  };
   const status: LiveStatus = {
     pid: process.pid,
     mode: cfg.mode,
@@ -136,7 +147,8 @@ async function main() {
   );
   console.log(
     `Jupiter: ${cfg.jupiterApiKey ? "using your API key" : "no API key"} (${cfg.jupiterRpm} requests/min), ` +
-      `so at most ~${(60_000 / cfg.minScanIntervalMs).toFixed(1)} scans/min`,
+      `so up to ~${maxScansPerMin(cfg.jupiterMsPerRequest).toFixed(1)} full scans/min, ` +
+      `or ~${maxScansPerMin(cfg.jupiterMsPerRequest, 2).toFixed(0)} focus scans/min on a moving token`,
   );
 
   while (running) {
@@ -151,7 +163,7 @@ async function main() {
           const found = await discoverTokens(
             cfg.jupiterTokensApi,
             { minLiquidityUsd: cfg.minTokenLiquidityUsd, limit: cfg.maxTokens },
-            fetch,
+            jupFetch,
             cfg.jupiterApiKey,
           );
           const added = brain.learnTokens(found, cfg.tokens, cfg.maxTokens);
@@ -228,6 +240,11 @@ async function main() {
       }
 
       const tokens = brain.pickTokens(brain.tokenPool(cfg.tokens));
+      // Hard guarantee: wait until this scan's requests fit in the 60s window.
+      const roomInMs = budget.waitFor(Object.keys(tokens).length * 2);
+      if (roomInMs > 0) await sleep(roomInMs);
+      if (!running) break;
+      scanTimes.push(Date.now());
       const buckets: Record<string, SizeBucket> = {};
       const sizeFor = (sym: string) => {
         const pick = brain.pickSize(sym, sizeUsd);
@@ -298,6 +315,7 @@ async function main() {
 
       brain.observePace(rateLimited);
       nextWaitMs = brain.nextIntervalMs(best?.eval.netBps, cfg.scanIntervalMs);
+      const focus = brain.plannedRequests() < TOKENS_PER_SCAN * 2 ? brain.hotSymbols() : [];
       if (rateLimited) {
         nextWaitMs = Math.max(nextWaitMs, RATE_LIMIT_BACKOFF_MS);
         console.warn(`Jupiter says too many requests; slowing down (safe pace now ${brain.paceFloorMs / 1000}s)`);
@@ -307,6 +325,10 @@ async function main() {
         note: rateLimited ? "Jupiter rate limit: backing off" : undefined,
         tradeSizeUsd: sizeUsd,
         paceFloorMs: brain.paceFloorMs,
+        focus,
+        jupiterUsed: budget.used(),
+        jupiterLimit: cfg.jupiterRpm,
+        scansLastMin: scansInLastMinute(),
         nextScanInMs: nextWaitMs,
         lastBest: best && {
           symbol: best.symbol,

@@ -29,17 +29,23 @@ export const JUPITER_KEYLESS_RPM = 30;
 export const JUPITER_FREE_KEY_RPM = 60;
 
 /** Room left each minute for requests outside scans (SOL price, token list). */
-const EXTRA_REQUESTS_PER_MIN = 2;
+export const EXTRA_REQUESTS_PER_MIN = 2;
 
 /**
- * Fastest scan pace that can never exceed the per-minute limit. Jupiter
- * counts any 60-second window, and one that starts just before a scan holds
- * (60/T + 1) scans, so: (60/T + 1) * REQUESTS_PER_SCAN + extras <= limit.
+ * Even spacing per request that uses the whole budget: e.g. 30/min -> about
+ * 2.1s per request (a 6-request scan every ~12.9s); 60/min -> ~1.04s
+ * (a scan every ~6.2s, or a 2-request focus scan every ~2.1s). A sliding-window
+ * counter (RequestBudget) additionally guarantees no 60s window goes over.
  */
-export function jupiterScanBudgetMs(requestsPerMinute: number): number {
-  const spare = requestsPerMinute - EXTRA_REQUESTS_PER_MIN - REQUESTS_PER_SCAN;
-  if (spare <= 0) return 60_000;
-  return Math.ceil((60_000 * REQUESTS_PER_SCAN) / spare);
+export function jupiterMsPerRequest(requestsPerMinute: number): number {
+  const usable = requestsPerMinute - EXTRA_REQUESTS_PER_MIN;
+  if (usable <= 0) return 60_000;
+  return Math.ceil(60_000 / usable);
+}
+
+/** Full scans per minute the budget allows (every token in a scan costs 2 requests). */
+export function maxScansPerMin(msPerRequest: number, requestsPerScan = REQUESTS_PER_SCAN): number {
+  return 60_000 / (msPerRequest * requestsPerScan);
 }
 
 /** lite-api ignores API keys, so a key only helps on api.jup.ag. */
@@ -78,11 +84,10 @@ export interface Config {
   maxConsecutiveFailures: number;
   failureCooldownMs: number;
   scanIntervalMs: number;
-  /**
-   * Fastest the bot may ever scan: the larger of MIN_SCAN_INTERVAL_MS and what
-   * the Jupiter request budget allows. It learns the real safe pace above this.
-   */
+  /** Absolute fastest the bot may ever scan, whatever the budget allows. */
   minScanIntervalMs: number;
+  /** Even spacing per Jupiter request that uses the whole budget. */
+  jupiterMsPerRequest: number;
   monthlyCostsUsd: Record<string, number>;
   sustainStopAfterMonths: number;
   /** Let the brain find extra actively-traded tokens by itself. */
@@ -156,7 +161,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     maxConsecutiveFailures: num(env, "MAX_CONSECUTIVE_FAILURES", 5),
     failureCooldownMs: num(env, "FAILURE_COOLDOWN_MS", 10 * 60_000),
     scanIntervalMs: num(env, "SCAN_INTERVAL_MS", 5_000),
-    minScanIntervalMs: Math.max(num(env, "MIN_SCAN_INTERVAL_MS", 1_000), jupiterScanBudgetMs(jupiterRpm)),
+    minScanIntervalMs: num(env, "MIN_SCAN_INTERVAL_MS", 1_000),
+    jupiterMsPerRequest: jupiterMsPerRequest(jupiterRpm),
     monthlyCostsUsd: costs,
     sustainStopAfterMonths: num(env, "SUSTAIN_STOP_AFTER_MONTHS", 2),
     tokenDiscovery: env.TOKEN_DISCOVERY !== "off",
