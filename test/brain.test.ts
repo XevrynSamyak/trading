@@ -185,3 +185,26 @@ describe("Brain: reality checks, sudden moves, and thoughts", () => {
     expect(b.thoughts(20).length).toBeGreaterThan(0);
   });
 });
+
+describe("Brain: learns the fastest safe scan pace", () => {
+  it("speeds up after clean scans, slows down on a rate limit, never below the minimum", () => {
+    const b = new Brain(tmp(), { baseMinProfitBps: 20, minIntervalMs: 2_000 });
+    expect(b.paceFloorMs).toBe(8_000);
+    for (let i = 0; i < 10; i++) b.observePace(false);
+    expect(b.paceFloorMs).toBe(7_200);
+    b.observePace(true);
+    expect(b.paceFloorMs).toBe(14_400);
+    for (let i = 0; i < 500; i++) b.observePace(false);
+    expect(b.paceFloorMs).toBe(2_000);
+    expect(b.nextIntervalMs(5, 5_000, 0)).toBe(5_000);
+    expect(b.nextIntervalMs(18, 5_000, 0)).toBe(2_500); // near a gap: faster
+  });
+
+  it("remembers its pace across restarts", () => {
+    const path = tmp();
+    const b = new Brain(path, { baseMinProfitBps: 20 });
+    b.observePace(true);
+    b.save();
+    expect(new Brain(path, { baseMinProfitBps: 20 }).paceFloorMs).toBe(16_000);
+  });
+});

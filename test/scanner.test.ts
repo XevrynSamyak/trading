@@ -28,3 +28,24 @@ describe("scan", () => {
     expect(opps[1].eval.netUsd).toBeLessThan(0);
   });
 });
+
+describe("parallel scan", () => {
+  it("quotes all tokens at once and keeps the ones that succeed", async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const base = fakeFetch();
+    const fetchFn = (async (url: string) => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((r) => setTimeout(r, 10));
+      inFlight--;
+      if (url.includes("outputMint=BAD")) return new Response("Too Many Requests", { status: 429 });
+      return base(url);
+    }) as typeof fetch;
+    const errors: string[] = [];
+    const opps = await scan(new JupiterClient("https://fake", fetchFn), { X: "X", Y: "Y", BAD: "BAD" }, () => 10_000_000n, 10_000, 200, (s, e) => errors.push(`${s}: ${String(e)}`));
+    expect(opps.map((o) => o.symbol)).toEqual(["X", "Y"]);
+    expect(errors[0]).toMatch(/^BAD: .*429/);
+    expect(maxInFlight).toBe(3);
+  });
+});

@@ -41,6 +41,8 @@ export interface Config {
   maxConsecutiveFailures: number;
   failureCooldownMs: number;
   scanIntervalMs: number;
+  /** The absolute fastest the bot may scan; it learns the real safe pace above this. */
+  minScanIntervalMs: number;
   monthlyCostsUsd: Record<string, number>;
   sustainStopAfterMonths: number;
   /** Let the brain find extra actively-traded tokens by itself. */
@@ -109,7 +111,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     dailyLossLimitUsd: num(env, "DAILY_LOSS_LIMIT_USD", 2),
     maxConsecutiveFailures: num(env, "MAX_CONSECUTIVE_FAILURES", 5),
     failureCooldownMs: num(env, "FAILURE_COOLDOWN_MS", 10 * 60_000),
-    scanIntervalMs: num(env, "SCAN_INTERVAL_MS", 15_000),
+    scanIntervalMs: num(env, "SCAN_INTERVAL_MS", 5_000),
+    minScanIntervalMs: num(env, "MIN_SCAN_INTERVAL_MS", 2_000),
     monthlyCostsUsd: costs,
     sustainStopAfterMonths: num(env, "SUSTAIN_STOP_AFTER_MONTHS", 2),
     tokenDiscovery: env.TOKEN_DISCOVERY !== "off",

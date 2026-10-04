@@ -57,15 +57,17 @@ export async function scan(
   solPriceUsd: number,
   onError: (symbol: string, err: unknown) => void = () => {},
 ): Promise<Opportunity[]> {
+  // All tokens at once: the scan finishes sooner, so prices are fresher.
+  // (Same number of requests; the brain paces cycles to stay under the rate limit.)
+  const entries = Object.entries(tokens);
+  const settled = await Promise.allSettled(
+    entries.map(([symbol, mint]) => quoteRoundTrip(jup, symbol, mint, sizeFor(symbol), priorityFeeLamports, solPriceUsd)),
+  );
   const results: Opportunity[] = [];
-  // Sequential on purpose: free Jupiter tier is rate-limited.
-  for (const [symbol, mint] of Object.entries(tokens)) {
-    try {
-      results.push(await quoteRoundTrip(jup, symbol, mint, sizeFor(symbol), priorityFeeLamports, solPriceUsd));
-    } catch (err) {
-      onError(symbol, err);
-    }
-  }
+  settled.forEach((r, i) => {
+    if (r.status === "fulfilled") results.push(r.value);
+    else onError(entries[i][0], r.reason);
+  });
   return results.sort((a, b) => b.eval.netUsd - a.eval.netUsd);
 }
 

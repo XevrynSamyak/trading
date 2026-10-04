@@ -19,6 +19,8 @@ export interface LiveStatus {
   lastBest?: { symbol: string; netBps: number; expectedBps: number; needBps: number };
   hot: string[];
   nextScanInMs: number;
+  /** Fastest safe pace the brain has learned (ms between scans). */
+  paceFloorMs?: number;
 }
 
 export function writeStatus(path: string, status: LiveStatus): void {

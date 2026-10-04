@@ -19,10 +19,20 @@ import { getBalances, loadKeypair, walletValueUsd } from "./wallet.js";
 const SOL_PRICE_REFRESH_MS = 5 * 60_000;
 const DISCOVERY_INTERVAL_MS = 6 * 60 * 60_000;
 const TIP_ACCOUNTS_RETRY_MS = 10 * 60_000;
-const RATE_LIMIT_BACKOFF_MS = 60_000;
+/** Short pause after "too many requests"; the learned pace does the real slowing down. */
+const RATE_LIMIT_BACKOFF_MS = 10_000;
 /** On-chain tests need SOL for fees and for opening token accounts (~0.002 SOL each). */
 const MIN_SOL_TO_SIMULATE = 0.01;
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+// Sleep that a stop signal can cut short, so stopping the bot is immediate.
+let wakeUp: (() => void) | undefined;
+const sleep = (ms: number) =>
+  new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    wakeUp = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+  });
 
 async function main() {
   const cfg = loadConfig();
@@ -40,7 +50,10 @@ async function main() {
   const owner = wallet?.publicKey ?? (cfg.walletPublicKey ? new PublicKey(cfg.walletPublicKey) : undefined);
   const jito = cfg.sendVia === "jito" ? new JitoClient(cfg.jitoUrl) : undefined;
   const ledger = new Ledger(join(cfg.dataDir, `trades-${cfg.mode}.jsonl`));
-  const brain = new Brain(join(cfg.dataDir, `brain-${cfg.mode}.json`), { baseMinProfitBps: cfg.minProfitBps });
+  const brain = new Brain(join(cfg.dataDir, `brain-${cfg.mode}.json`), {
+    baseMinProfitBps: cfg.minProfitBps,
+    minIntervalMs: cfg.minScanIntervalMs,
+  });
   const risk = new RiskManager(cfg);
   const extraLamports = extraFeeLamports(cfg);
 
@@ -55,6 +68,7 @@ async function main() {
   for (const sig of ["SIGINT", "SIGTERM"] as const) {
     process.on(sig, () => {
       running = false;
+      wakeUp?.();
     });
   }
 
@@ -272,15 +286,17 @@ async function main() {
         else console.log(line);
       }
 
+      brain.observePace(rateLimited);
       nextWaitMs = brain.nextIntervalMs(best?.eval.netBps, cfg.scanIntervalMs);
       if (rateLimited) {
         nextWaitMs = Math.max(nextWaitMs, RATE_LIMIT_BACKOFF_MS);
-        console.warn("Jupiter says too many requests; backing off for a minute");
+        console.warn(`Jupiter says too many requests; slowing down (safe pace now ${brain.paceFloorMs / 1000}s)`);
       }
       publish({
         state: "scanning",
         note: rateLimited ? "Jupiter rate limit: backing off" : undefined,
         tradeSizeUsd: sizeUsd,
+        paceFloorMs: brain.paceFloorMs,
         nextScanInMs: nextWaitMs,
         lastBest: best && {
           symbol: best.symbol,

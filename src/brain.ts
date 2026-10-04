@@ -13,6 +13,7 @@ import { dirname } from "node:path";
  *  - which tokens show fake gaps (quotes that don't hold on-chain) -> trusts them less
  *  - how much each token's quotes overstate reality -> discounts its quotes by that
  *  - sudden price moves (when gaps tend to appear) -> watches that token closely
+ *  - how fast the free price API lets it scan -> runs as fast as is safe
  * It also explains what it noticed in plain language (thoughts()).
  * State is saved to disk so it keeps what it learned across restarts.
  */
@@ -62,6 +63,8 @@ export interface BrainState {
   startedAt: number;
   /** The closest it has come to a profitable gap. */
   bestGap: Moment | null;
+  /** Fastest scan pace (ms between scans) that hasn't hit the API rate limit. */
+  paceFloorMs: number;
   /** Sudden price moves it reacted to. */
   hotEvents: number;
   lastHot: Moment | null;
@@ -76,7 +79,7 @@ export interface BrainOptions {
   tokensPerCycle?: number;
   /** Chance of trying something other than the current best (token or size). */
   exploreRate?: number;
-  /** Scan interval bounds for adaptive pacing. */
+  /** Scan interval bounds for adaptive pacing (min = the absolute fastest it may ever go). */
   minIntervalMs?: number;
   maxIntervalMs?: number;
   random?: () => number;
@@ -90,6 +93,9 @@ const SIZE_WARMUP = 3;
 const PRUNE_AFTER_SCANS = 50;
 const PRUNE_BELOW_BPS = -30;
 const HAIRCUT_SMOOTHING = 0.3;
+/** Pace learning: start here, speed up 10% after this many clean scans, halve speed on a rate limit. */
+const START_PACE_MS = 8_000;
+const CLEAN_SCANS_TO_SPEED_UP = 10;
 /** A move this big (bps) between two scans of a token marks it "hot". */
 const HOT_MOVE_BPS = 30;
 /** ...if the two scans were at most this far apart. */
@@ -117,6 +123,7 @@ export class Brain {
   /** Short-term memory (not saved): last price seen per token+size, and hot tokens. */
   private lastRate = new Map<string, { rate: number; at: number }>();
   private hotUntil = new Map<string, number>();
+  private cleanScans = 0;
 
   constructor(
     private readonly path: string,
@@ -127,7 +134,7 @@ export class Brain {
       maxBps: opts.baseMinProfitBps * 4,
       tokensPerCycle: 3,
       exploreRate: 0.2,
-      minIntervalMs: 8_000,
+      minIntervalMs: 2_000,
       maxIntervalMs: 60_000,
       random: Math.random,
       ...opts,
@@ -144,6 +151,7 @@ export class Brain {
       edgeHistogram: loaded?.edgeHistogram ?? {},
       startedAt: loaded?.startedAt ?? Date.now(),
       bestGap: loaded?.bestGap ?? null,
+      paceFloorMs: loaded?.paceFloorMs ?? START_PACE_MS,
       hotEvents: loaded?.hotEvents ?? 0,
       lastHot: loaded?.lastHot ?? null,
     };
@@ -399,7 +407,31 @@ export class Brain {
     const good = this.isGoodHour(hour);
     if (good === true) factor *= 0.8;
     else if (good === false) factor *= 1.25;
-    return Math.round(Math.min(this.opts.maxIntervalMs, Math.max(this.opts.minIntervalMs, baseMs * factor)));
+    return Math.round(Math.min(this.opts.maxIntervalMs, Math.max(this.paceFloorMs, baseMs * factor)));
+  }
+
+  // ---- how fast to scan ---------------------------------------------------
+
+  /**
+   * Finds the fastest safe pace by itself: a little faster after every run of
+   * clean scans, twice as slow as soon as the price API says "too many
+   * requests". Remembered across restarts.
+   */
+  observePace(rateLimited: boolean): void {
+    if (rateLimited) {
+      this.cleanScans = 0;
+      this.state.paceFloorMs = Math.min(this.opts.maxIntervalMs, this.state.paceFloorMs * 2);
+      return;
+    }
+    this.cleanScans += 1;
+    if (this.cleanScans >= CLEAN_SCANS_TO_SPEED_UP) {
+      this.cleanScans = 0;
+      this.state.paceFloorMs = Math.max(this.opts.minIntervalMs, Math.round(this.state.paceFloorMs * 0.9));
+    }
+  }
+
+  get paceFloorMs(): number {
+    return Math.max(this.opts.minIntervalMs, this.state.paceFloorMs);
   }
 
   // ---- reporting ----------------------------------------------------------

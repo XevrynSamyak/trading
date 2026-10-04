@@ -99,6 +99,12 @@ export function renderStatus(i: StatusInput): string {
           `${closeness >= 1 ? green(bar(1, 12)) : bar(closeness, 12)} ${dim("how close")}`,
       );
     }
+    if (live.paceFloorMs) {
+      out.push(
+        `Speed:   ~${Math.round(60_000 / Math.max(live.paceFloorMs, live.nextScanInMs || live.paceFloorMs))} scans/min ` +
+          dim(`(fastest safe pace learned so far: every ${(live.paceFloorMs / 1000).toFixed(1)}s)`),
+      );
+    }
     if (live.hot.length) out.push(`Hot:     ${yellow(live.hot.join(", "))} ${dim("(sudden price moves)")}`);
     out.push(
       `Wallet:  $${live.walletValueUsd.toFixed(2)}${live.mode === "paper" ? dim(" (paper)") : ""}   ` +
