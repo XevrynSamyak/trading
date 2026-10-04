@@ -12,6 +12,7 @@ import { makeNotifier } from "./notify.js";
 import { usdToUsdcAtoms } from "./profit.js";
 import { RiskManager } from "./risk.js";
 import { fetchSolPriceUsd, scan } from "./scanner.js";
+import { writeStatus, type LiveStatus } from "./status-file.js";
 import { formatVerdict, monthVerdict, shouldRetire } from "./sustain.js";
 import { getBalances, loadKeypair, walletValueUsd } from "./wallet.js";
 
@@ -78,6 +79,34 @@ async function main() {
   let lastMonth = startOfUtcMonth(Date.now());
   let warnedUnfunded = false;
 
+  // Live progress for `npm run status`.
+  const statusPath = join(cfg.dataDir, "status.json");
+  const startedAt = Date.now();
+  let cycles = 0;
+  const status: LiveStatus = {
+    pid: process.pid,
+    mode: cfg.mode,
+    startedAt,
+    updatedAt: startedAt,
+    cycles: 0,
+    state: "scanning",
+    onChainTesting: false,
+    sendVia: cfg.sendVia,
+    solPrice: 0,
+    walletValueUsd: cfg.startingBalanceUsd,
+    tradeSizeUsd: 0,
+    hot: [],
+    nextScanInMs: 0,
+  };
+  const publish = (patch: Partial<LiveStatus>) => {
+    Object.assign(status, patch, { updatedAt: Date.now(), cycles, solPrice, hot: brain.hotSymbols() });
+    try {
+      writeStatus(statusPath, status);
+    } catch {
+      // Status is only for display; never let it stop trading.
+    }
+  };
+
   const how =
     cfg.mode === "live"
       ? `sending via ${cfg.sendVia.toUpperCase()}`
@@ -92,6 +121,7 @@ async function main() {
 
   while (running) {
     const now = Date.now();
+    cycles += 1;
     let nextWaitMs = cfg.scanIntervalMs;
     let rateLimited = false;
     try {
@@ -158,8 +188,10 @@ async function main() {
       }
 
       const decision = risk.check(valueUsd, ledger.pnlBetween(startOfUtcDay(now), undefined, records), now);
+      publish({ walletValueUsd: valueUsd, onChainTesting: cfg.mode === "paper" && !!simulateAs });
       if (!decision.ok) {
         if (decision.halt) await halt(decision.reason);
+        publish({ state: "paused", note: decision.reason, nextScanInMs: cfg.scanIntervalMs * 4 });
         console.log(`paused: ${decision.reason}`);
         await sleep(cfg.scanIntervalMs * 4);
         continue;
@@ -167,6 +199,7 @@ async function main() {
 
       const sizeUsd = tradeSizeUsd(cfg, usdcUsd);
       if (sizeUsd < 1) {
+        publish({ state: "waiting", note: `only $${usdcUsd.toFixed(2)} USDC available`, nextScanInMs: cfg.scanIntervalMs * 4 });
         console.log(`only $${usdcUsd.toFixed(2)} USDC available; waiting`);
         await sleep(cfg.scanIntervalMs * 4);
         continue;
@@ -244,14 +277,28 @@ async function main() {
         nextWaitMs = Math.max(nextWaitMs, RATE_LIMIT_BACKOFF_MS);
         console.warn("Jupiter says too many requests; backing off for a minute");
       }
+      publish({
+        state: "scanning",
+        note: rateLimited ? "Jupiter rate limit: backing off" : undefined,
+        tradeSizeUsd: sizeUsd,
+        nextScanInMs: nextWaitMs,
+        lastBest: best && {
+          symbol: best.symbol,
+          netBps: best.eval.netBps,
+          expectedBps: brain.expectedNetBps(best.symbol, best.eval.netBps),
+          needBps: brain.minProfitBps,
+        },
+      });
       brain.save();
     } catch (err) {
       console.error("cycle error:", err);
+      publish({ note: `last cycle error: ${String(err).slice(0, 100)}`, nextScanInMs: nextWaitMs });
     }
     await sleep(nextWaitMs);
   }
 
   brain.save();
+  publish({ state: "stopped", note: undefined, nextScanInMs: 0 });
   await notify("Stopped.");
 }
 

@@ -261,6 +261,10 @@ export class Brain {
     return moveBps;
   }
 
+  hotSymbols(now = Date.now()): string[] {
+    return [...this.hotUntil.entries()].filter(([, until]) => until > now).map(([sym]) => sym);
+  }
+
   isHot(symbol: string, now = Date.now()): boolean {
     return (this.hotUntil.get(symbol) ?? 0) > now;
   }

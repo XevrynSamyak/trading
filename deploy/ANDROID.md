@@ -85,6 +85,26 @@ Never paste the wallet's secret key or seed phrase anywhere for this step.
 
 ## 6. Check on it
 
+See what the bot is doing right now:
+
+```bash
+cd ~/trading && npm run status
+```
+
+Or keep a live screen open that refreshes every 5 seconds (Ctrl+C to close it;
+the bot keeps running):
+
+```bash
+cd ~/trading && npm run watch
+```
+
+It shows whether the bot is running (or stopped/stuck/halted), the last scan
+and how close it came to a profitable gap, a progress bar for the 3-day test,
+the "Go live?" verdict, results, how close gaps have been, what the brain is
+thinking, and recent events.
+
+For the full numbers:
+
 ```bash
 cd ~/trading && npm run report
 ```

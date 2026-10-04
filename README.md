@@ -103,6 +103,8 @@ On any computer with Node 20+:
 npm install
 cp .env.example .env     # edit it
 npm start                # paper mode by default
+npm run status           # is it running, what it's doing, test progress
+npm run watch            # same, live (refreshes every 5s)
 npm run report           # P&L, bills verdict, what the brain learned
 npm test
 ```

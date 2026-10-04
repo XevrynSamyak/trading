@@ -7,6 +7,8 @@
   "scripts": {
     "start": "tsx src/index.ts",
     "check": "tsx src/check.ts",
+    "status": "tsx src/status.ts",
+    "watch": "tsx src/status.ts --watch",
     "report": "tsx src/report-cli.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
