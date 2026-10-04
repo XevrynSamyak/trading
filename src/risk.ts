@@ -31,7 +31,8 @@ export class RiskManager {
     return { ok: true };
   }
 
-  recordResult(status: "filled" | "skipped" | "failed", now = Date.now()): void {
+  /** Only on-chain failures count; rejected/skipped attempts cost nothing. */
+  recordResult(status: "filled" | "rejected" | "skipped" | "failed", now = Date.now()): void {
     if (status === "failed") {
       this.consecutiveFailures += 1;
       if (this.consecutiveFailures >= this.limits.maxConsecutiveFailures) {

@@ -10,6 +10,7 @@ import { dirname } from "node:path";
  *  - how close it is to a gap -> speeds up when one is nearly there
  *  - how its trades turn out -> tunes how much profit it demands per trade
  *  - which newly discovered tokens are worth keeping -> forgets the useless ones
+ *  - which tokens show fake gaps (quotes that don't hold on-chain) -> trusts them less
  * State is saved to disk so it keeps what it learned across restarts.
  */
 
@@ -30,6 +31,8 @@ export interface TokenStats {
   fills: number;
   failures: number;
   pnlUsd: number;
+  /** Quoted gaps that were not real when checked on-chain. */
+  phantoms: number;
   sizes: Record<string, BucketStats>;
 }
 
@@ -41,6 +44,10 @@ export interface BrainState {
   hourEdgeBps: (number | null)[];
   /** Tokens it found by itself (symbol -> mint), on top of the configured ones. */
   discovered: Record<string, string>;
+  /** How often the best scan of a cycle landed in each edge range (bps). */
+  edgeHistogram: Record<string, number>;
+  /** When this brain started learning (ms). */
+  startedAt: number;
 }
 
 export interface BrainOptions {
@@ -67,6 +74,18 @@ const PRUNE_AFTER_SCANS = 50;
 const PRUNE_BELOW_BPS = -30;
 
 const ewma = (prev: number, next: number, a: number) => prev * (1 - a) + next * a;
+
+/** Edge ranges (bps) for the "how close did gaps get" histogram. */
+export const EDGE_BINS: [label: string, upTo: number][] = [
+  ["< -20", -20],
+  ["-20..-5", -5],
+  ["-5..0", 0],
+  ["0..5", 5],
+  ["5..10", 10],
+  ["10..20", 20],
+  ["20+", Number.POSITIVE_INFINITY],
+];
+export const edgeBin = (bps: number): string => EDGE_BINS.find(([, upTo]) => bps < upTo)![0];
 
 export class Brain {
   state: BrainState;
@@ -95,8 +114,13 @@ export class Brain {
       // Older brain files lack these; fill them in so they upgrade in place.
       hourEdgeBps: loaded?.hourEdgeBps ?? Array(24).fill(null),
       discovered: loaded?.discovered ?? {},
+      edgeHistogram: loaded?.edgeHistogram ?? {},
+      startedAt: loaded?.startedAt ?? Date.now(),
     };
-    for (const s of Object.values(this.state.tokens)) s.sizes ??= {};
+    for (const s of Object.values(this.state.tokens)) {
+      s.sizes ??= {};
+      s.phantoms ??= 0;
+    }
   }
 
   private load(): Partial<BrainState> | null {
@@ -114,7 +138,15 @@ export class Brain {
   }
 
   private stats(symbol: string): TokenStats {
-    return (this.state.tokens[symbol] ??= { scans: 0, avgEdgeBps: 0, fills: 0, failures: 0, pnlUsd: 0, sizes: {} });
+    return (this.state.tokens[symbol] ??= {
+      scans: 0,
+      avgEdgeBps: 0,
+      fills: 0,
+      failures: 0,
+      pnlUsd: 0,
+      phantoms: 0,
+      sizes: {},
+    });
   }
 
   // ---- which tokens -------------------------------------------------------
@@ -152,8 +184,10 @@ export class Brain {
     const s = this.stats(symbol);
     if (s.scans === 0) return Number.POSITIVE_INFINITY;
     const curiosity = 10 * Math.sqrt(Math.log(this.state.totalScans + 1) / s.scans);
-    const reliability = s.fills + s.failures > 0 ? s.fills / (s.fills + s.failures) : 0.5;
-    return s.avgEdgeBps + curiosity + 5 * reliability;
+    // Tokens whose gaps turn out fake (phantoms) or fail lose trust.
+    const tries = s.fills + s.failures + s.phantoms;
+    const reliability = tries > 0 ? (s.fills + 0.5) / (tries + 1) : 0.5;
+    return s.avgEdgeBps + curiosity + 10 * reliability;
   }
 
   /** Picks which tokens to scan this cycle. */
@@ -207,12 +241,21 @@ export class Brain {
     this.state.hourEdgeBps[hour] = prev === null ? netBps : ewma(prev, netBps, HOUR_SMOOTHING);
   }
 
+  /** Records the best edge of a scan cycle for the histogram. */
+  observeCycle(bestNetBps: number): void {
+    const bin = edgeBin(bestNetBps);
+    this.state.edgeHistogram[bin] = (this.state.edgeHistogram[bin] ?? 0) + 1;
+  }
+
   /** Learns from a trade outcome and adjusts how picky it is. */
-  observeTrade(symbol: string, status: "filled" | "skipped" | "failed", netUsd: number): void {
+  observeTrade(symbol: string, status: "filled" | "rejected" | "skipped" | "failed", netUsd: number): void {
     const s = this.stats(symbol);
     s.pnlUsd += netUsd;
     let bps = this.state.minProfitBps;
-    if (status === "failed" || (status === "filled" && netUsd < 0)) {
+    if (status === "rejected") {
+      // Gap was fake but cost nothing: trust this token less, threshold unchanged.
+      s.phantoms += 1;
+    } else if (status === "failed" || (status === "filled" && netUsd < 0)) {
       s.failures += status === "failed" ? 1 : 0;
       bps *= 1.25; // got burned: demand a fatter edge
     } else if (status === "filled") {
@@ -270,6 +313,14 @@ export class Brain {
       lines.push(`best hours (UTC): ${hours.map(([h, v]) => `${h}:00 (${v.toFixed(1)}bps)`).join(", ")}`);
     }
 
+    const total = Object.values(this.state.edgeHistogram).reduce((a, b) => a + b, 0);
+    if (total) {
+      const parts = EDGE_BINS.map(([label]) => [label, this.state.edgeHistogram[label] ?? 0] as const)
+        .filter(([, n]) => n > 0)
+        .map(([label, n]) => `${label}: ${((n / total) * 100).toFixed(1)}%`);
+      lines.push(`best gap per scan (bps): ${parts.join(", ")}`);
+    }
+
     const discovered = Object.keys(this.state.discovered);
     if (discovered.length) lines.push(`found by itself: ${discovered.join(", ")}`);
 
@@ -277,7 +328,8 @@ export class Brain {
       const best = Object.entries(s.sizes).sort(([, a], [, b]) => b.avgNetUsd - a.avgNetUsd)[0];
       const size = best ? `, best size ${Math.round(Number(best[0]) * 100)}%` : "";
       lines.push(
-        `${sym}: edge ${s.avgEdgeBps.toFixed(1)}bps, ${s.fills} fills, ${s.failures} fails, $${s.pnlUsd.toFixed(4)}${size}`,
+        `${sym}: edge ${s.avgEdgeBps.toFixed(1)}bps, ${s.fills} fills, ${s.failures} fails, ` +
+          `${s.phantoms} fake gaps, $${s.pnlUsd.toFixed(4)}${size}`,
       );
     }
     return lines.join("\n");

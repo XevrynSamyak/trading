@@ -65,11 +65,32 @@ cp deploy/termux-boot.sh ~/.termux/boot/start-arb-bot
 chmod +x ~/.termux/boot/start-arb-bot
 ```
 
-## 5. Check on it
+## 5. Make the test realistic (recommended)
+
+Quote-only paper results are too optimistic. To have the bot test every
+trade on the real chain (nothing is sent, no secret key needed):
+
+1. In Phantom (or Solflare), **create a new wallet/account** just for the bot.
+2. Send it the bot's money: about $20 of USDC plus ~$3 of SOL (network fees, plus a refundable ~0.002 SOL deposit the first time it trades each token).
+3. Copy that account's **public address** (starts with a letter/number,
+   ~44 characters) and put it in `.env`:
+   ```
+   WALLET_PUBLIC_KEY=YourBotWalletAddressHere
+   ```
+4. `npm run check` should show your balances and
+   `-> paper trades will be tested on-chain`.
+5. Restart the bot (see "Stop it" below, then start it again).
+
+Never paste the wallet's secret key or seed phrase anywhere for this step.
+
+## 6. Check on it
 
 ```bash
 cd ~/trading && npm run report
 ```
+
+The last lines give a **Go live?** verdict. Only consider live trading when it
+says `TRY-LIVE`.
 
 Optional: put `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env` (create a
 bot with @BotFather) to get trade alerts and daily summaries on your main

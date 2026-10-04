@@ -95,3 +95,21 @@ describe("Brain: smarter skills", () => {
     expect(b.summary()).toContain("A: edge -3.0bps");
   });
 });
+
+describe("Brain: fake gaps and the gap histogram", () => {
+  it("trusts tokens with fake gaps less, without getting pickier overall", () => {
+    const b = new Brain(tmp(), { baseMinProfitBps: 20 });
+    for (const sym of ["A", "B"]) for (let i = 0; i < 20; i++) b.observeScan(sym, 0);
+    for (let i = 0; i < 5; i++) b.observeTrade("A", "rejected", 0);
+    expect(b.score("A")).toBeLessThan(b.score("B"));
+    expect(b.minProfitBps).toBe(20);
+    expect(b.summary()).toContain("5 fake gaps");
+  });
+
+  it("keeps a histogram of how close the best gap got", () => {
+    const b = new Brain(tmp(), { baseMinProfitBps: 20 });
+    [-30, -3, -2, 7].forEach((bps) => b.observeCycle(bps));
+    expect(b.state.edgeHistogram).toEqual({ "< -20": 1, "-5..0": 2, "5..10": 1 });
+    expect(b.summary()).toContain("-5..0: 50.0%");
+  });
+});

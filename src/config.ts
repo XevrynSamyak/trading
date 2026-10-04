@@ -21,6 +21,12 @@ export interface Config {
   rpcUrl: string;
   jupiterApi: string;
   walletSecretKey?: string;
+  /** Public address only: lets paper mode test trades on-chain without the secret key. */
+  walletPublicKey?: string;
+  /** How live trades are sent: "jito" (failed attempts cost nothing) or plain "rpc". */
+  sendVia: "jito" | "rpc";
+  jitoUrl: string;
+  jitoTipLamports: number;
   tokens: Record<string, string>;
   /** Fraction of the wallet's USDC used per trade; trades grow as the wallet grows. */
   tradeSizePct: number;
@@ -76,6 +82,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   }
 
   const startingBalanceUsd = num(env, "STARTING_BALANCE_USD", 25);
+  const sendVia = env.SEND_VIA === "rpc" ? "rpc" : "jito";
   const tokens = env.TOKENS ? parsePairs(env.TOKENS) : DEFAULT_TOKENS;
   const costs = Object.fromEntries(
     Object.entries(parsePairs(env.MONTHLY_COSTS_USD ?? "server:0,rpc:0")).map(([k, v]) => [k, Number(v)]),
@@ -86,11 +93,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     rpcUrl: env.RPC_URL || "https://api.mainnet-beta.solana.com",
     jupiterApi: (env.JUPITER_API || "https://lite-api.jup.ag/swap/v1").replace(/\/$/, ""),
     walletSecretKey: env.WALLET_SECRET_KEY || undefined,
+    walletPublicKey: env.WALLET_PUBLIC_KEY || undefined,
+    sendVia,
+    jitoUrl: (env.JITO_URL || "https://mainnet.block-engine.jito.wtf/api/v1").replace(/\/$/, ""),
+    jitoTipLamports: num(env, "JITO_TIP_LAMPORTS", 10_000),
     tokens,
     tradeSizePct: num(env, "TRADE_SIZE_PCT", 0.8),
     maxTradeUsd: num(env, "MAX_TRADE_USD", 0),
     minProfitBps: num(env, "MIN_PROFIT_BPS", 20),
-    priorityFeeLamports: num(env, "PRIORITY_FEE_LAMPORTS", 10_000),
+    // Through Jito the tip does the work, so the priority fee can be tiny.
+    priorityFeeLamports: num(env, "PRIORITY_FEE_LAMPORTS", sendVia === "jito" ? 1_000 : 10_000),
     computeUnitLimit: num(env, "COMPUTE_UNIT_LIMIT", 600_000),
     startingBalanceUsd,
     lossFloorUsd: num(env, "LOSS_FLOOR_USD", +(startingBalanceUsd * 0.7).toFixed(2)),
@@ -127,4 +139,9 @@ export function tradeSizeUsd(cfg: Pick<Config, "tradeSizePct" | "maxTradeUsd">, 
   const size = usdcBalanceUsd * cfg.tradeSizePct;
   const capped = cfg.maxTradeUsd > 0 ? Math.min(size, cfg.maxTradeUsd) : size;
   return Math.floor(capped * 100) / 100;
+}
+
+/** Everything a landed trade pays the network on top of the 5000-lamport base fee. */
+export function extraFeeLamports(cfg: Pick<Config, "priorityFeeLamports" | "sendVia" | "jitoTipLamports">): number {
+  return cfg.priorityFeeLamports + (cfg.sendVia === "jito" ? cfg.jitoTipLamports : 0);
 }

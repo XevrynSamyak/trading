@@ -1,17 +1,20 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Mode } from "./config.js";
+import type { ExecStatus } from "./executor.js";
 
 export interface TradeRecord {
   ts: number;
   mode: Mode;
   symbol: string;
-  status: "filled" | "skipped" | "failed";
+  status: ExecStatus;
   inUsd: number;
   netUsd: number;
   feeUsd: number;
   signature?: string;
   reason?: string;
+  /** True if checked against the real chain (on-chain simulation or a live trade). */
+  verified?: boolean;
 }
 
 /** Append-only JSONL trade log. Plain file, no native deps. */

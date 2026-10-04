@@ -15,7 +15,7 @@ paper mode, and it stops on its own before losing more than you allow.
  your prepaid / virtual card ──autopay──▶ server + RPC providers (bills)
                                             ▲
                                             │ bot checks: did trading profit cover these?
- fresh Solana wallet ($20–30 USDC + ~$2 SOL for fees) ◀──▶ bot trades
+ fresh Solana wallet ($20–30 USDC + ~$3 SOL for fees) ◀──▶ bot trades
 ```
 
 - **The bot never holds bank or card details.** Put a prepaid or virtual
@@ -47,7 +47,32 @@ paper mode, and it stops on its own before losing more than you allow.
    guarantees profit. If prices moved, the whole transaction reverts
    (usually caught in simulation, so no fee at all).
 4. Results go to the **ledger**; the brain learns from them (pickier after
-   failures, looser after wins) and saves what it learned to disk.
+   failures, looser after wins, less trust in tokens whose gaps turn out
+   fake) and saves what it learned to disk.
+
+## Testing honestly before going live
+
+Quotes are optimistic: many gaps vanish before a trade could land. So paper
+mode has two levels:
+
+- **Quote-only** (no wallet set): fast to start, but results are too rosy.
+- **On-chain tested** (`WALLET_PUBLIC_KEY` set to your fresh, funded bot
+  wallet): for every opportunity the bot builds the *exact* transaction live
+  mode would send and simulates it on the real chain right now. Nothing is
+  signed or sent, and no secret key is needed. Gaps that wouldn't hold are
+  counted as **fake gaps**; real ones record what they'd actually have made.
+
+`npm run report` ends with a **Go live?** verdict based only on on-chain
+tested results: `KEEP-TESTING`, `NO-GAPS`, `VERIFY-FIRST`, `ALL-FAKE`,
+`NOT-WORTH-IT` or `TRY-LIVE`.
+
+## Live trading through Jito
+
+Live trades go through Jito's block engine as revert-protected transactions
+(`SEND_VIA=jito`, the default): if the gap is gone, the transaction is
+dropped and **costs nothing**. The tip (`JITO_TIP_LAMPORTS`) is only paid
+when it lands, and it can only land at a profit. Every trade is also
+simulated first, for free, so doomed attempts are never sent.
 
 ## Limits
 
@@ -78,12 +103,12 @@ npm test
 
 ### Going live
 
-Only after paper mode has shown profit for several days:
+Only after `npm run report` says `TRY-LIVE`:
 
-1. Create a **brand-new** wallet (e.g. `solana-keygen new`, or a new account
-   in Phantom/MetaMask). Fund it with USDC + ~$2 of SOL for fees.
+1. You already have the **brand-new** bot wallet from on-chain testing
+   (USDC + ~$3 of SOL for fees and refundable token-account deposits).
 2. In `.env`: `MODE=live`, `LIVE_TRADING_CONFIRM=yes`,
-   `WALLET_SECRET_KEY=<base58 secret>`.
+   `WALLET_SECRET_KEY=<base58 secret of that wallet>`.
 3. Set `MAX_TRADE_USD=1` for the first run, watch a trade on solscan.io, then
    set it back to `0`.
 
