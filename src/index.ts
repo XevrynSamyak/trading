@@ -70,6 +70,11 @@ async function main() {
   });
   const balanceCache = owner ? new BalanceCache(conn, owner) : undefined;
   const risk = new RiskManager(cfg);
+  // Older versions let quote-only paper wins lower the profit bar. Without any
+  // result checked on-chain, there is no real evidence for that: undo it.
+  if (brain.minProfitBps < cfg.minProfitBps && !ledger.all().some((r) => r.verified && r.status === "filled")) {
+    brain.state.minProfitBps = cfg.minProfitBps;
+  }
   const extraLamports = extraFeeLamports(cfg);
 
   const halt = async (reason: string) => {
@@ -321,7 +326,7 @@ async function main() {
           reason: result.reason,
           verified: result.verified,
         });
-        brain.observeTrade(best.symbol, result.status, result.netUsd);
+        brain.observeTrade(best.symbol, result.status, result.netUsd, result.verified === true);
         // A landed trade moved real money: read fresh balances next cycle.
         if (cfg.mode === "live" && (result.status === "filled" || result.status === "failed")) balanceCache?.invalidate();
         if (result.verified && (result.status === "filled" || result.status === "rejected")) {

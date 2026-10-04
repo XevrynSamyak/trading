@@ -397,8 +397,17 @@ export class Brain {
     return 2 * (focus ? Math.min(hot, FOCUS_MAX_TOKENS) : this.opts.tokensPerCycle);
   }
 
-  /** Learns from a trade outcome and adjusts how picky it is. */
-  observeTrade(symbol: string, status: "filled" | "rejected" | "skipped" | "failed", netUsd: number): void {
+  /**
+   * Learns from a trade outcome and adjusts how picky it is. Only results
+   * checked against the real chain may make it less picky: quote-only paper
+   * wins are too optimistic to learn from.
+   */
+  observeTrade(
+    symbol: string,
+    status: "filled" | "rejected" | "skipped" | "failed",
+    netUsd: number,
+    verified = true,
+  ): void {
     const s = this.stats(symbol);
     s.pnlUsd += netUsd;
     let bps = this.state.minProfitBps;
@@ -410,7 +419,7 @@ export class Brain {
       bps *= 1.25; // got burned: demand a fatter edge
     } else if (status === "filled") {
       s.fills += 1;
-      bps *= 0.95; // working: take slightly thinner edges for more trades
+      if (verified) bps *= 0.95; // really working: take slightly thinner edges for more trades
     }
     this.state.minProfitBps = Math.min(this.opts.maxBps, Math.max(this.opts.minBps, Math.round(bps * 10) / 10));
   }

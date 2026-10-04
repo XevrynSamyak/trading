@@ -97,6 +97,17 @@ describe("Brain: smarter skills", () => {
   });
 });
 
+describe("Brain: learns only from trustworthy results", () => {
+  it("quote-only paper wins don't make it less picky; verified wins do", () => {
+    const b = new Brain(tmp(), { baseMinProfitBps: 20 });
+    for (let i = 0; i < 10; i++) b.observeTrade("A", "filled", 0.01, false);
+    expect(b.minProfitBps).toBe(20);
+    expect(b.state.tokens.A.fills).toBe(10); // still counted
+    b.observeTrade("A", "filled", 0.01, true);
+    expect(b.minProfitBps).toBe(19);
+  });
+});
+
 describe("Brain: fake gaps and the gap histogram", () => {
   it("trusts tokens with fake gaps less, without getting pickier overall", () => {
     const b = new Brain(tmp(), { baseMinProfitBps: 20 });
