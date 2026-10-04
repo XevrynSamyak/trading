@@ -10,6 +10,16 @@ LOG=data/bot.log
 BOT_CMD=${BOT_CMD:-"npx tsx src/index.ts"}
 RESTART_DELAY=${RESTART_DELAY:-30}
 
+# Only one copy may run: two would corrupt the trade log and the brain file.
+PIDFILE=data/run.pid
+if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+  echo "Bot is already running (pid $(cat "$PIDFILE")). Watch it with: tail -f $LOG"
+  exit 0
+fi
+echo $$ >"$PIDFILE"
+trap 'rm -f "$PIDFILE"' EXIT
+touch "$LOG"
+
 command -v termux-wake-lock >/dev/null && termux-wake-lock || true
 
 while true; do

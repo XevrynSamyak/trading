@@ -77,6 +77,9 @@ phone.
 
 Stop it: `pkill -f termux-run.sh; pkill -f src/index.ts`
 
+Running `termux-run.sh` again while the bot is running is safe: it just
+says it's already running.
+
 ## Safety
 
 - Lock the phone with a PIN. The `.env` file holds the bot wallet's key.
