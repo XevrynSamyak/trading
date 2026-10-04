@@ -32,15 +32,29 @@ export const JUPITER_FREE_KEY_RPM = 60;
 export const EXTRA_REQUESTS_PER_MIN = 2;
 
 /**
- * Even spacing per request that uses the whole budget: e.g. 30/min -> about
- * 2.1s per request (a 6-request scan every ~12.9s); 60/min -> ~1.04s
- * (a scan every ~6.2s, or a 2-request focus scan every ~2.1s). A sliding-window
- * counter (RequestBudget) additionally guarantees no 60s window goes over.
+ * Limits the bot holds itself to. Jupiter's limit is per minute, but a "too
+ * many requests" seen at ~43 requests/min (6-request scans fired all at once,
+ * every ~8.4s) suggests short bursts count too. So besides the per-minute
+ * window (2 requests of slack), any 10-second window gets at most a sixth of
+ * the per-minute limit minus 1, which spreads requests out evenly.
+ */
+export function jupiterRateWindows(requestsPerMinute: number): { ms: number; limit: number }[] {
+  return [
+    { ms: 60_000, limit: Math.max(1, requestsPerMinute - 2) },
+    { ms: 10_000, limit: Math.max(2, Math.floor(requestsPerMinute / 6) - 1) },
+  ];
+}
+
+/**
+ * Even spacing per request that fits every window: 60/min -> ~1.11s per
+ * request (a 6-request scan every ~6.7s, or a 2-request focus scan every
+ * ~2.2s); 30/min -> 2.5s.
  */
 export function jupiterMsPerRequest(requestsPerMinute: number): number {
   const usable = requestsPerMinute - EXTRA_REQUESTS_PER_MIN;
   if (usable <= 0) return 60_000;
-  return Math.ceil(60_000 / usable);
+  const per10s = jupiterRateWindows(requestsPerMinute)[1].limit;
+  return Math.max(Math.ceil(60_000 / usable), Math.ceil(10_000 / per10s));
 }
 
 /** Full scans per minute the budget allows (every token in a scan costs 2 requests). */

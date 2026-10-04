@@ -56,10 +56,25 @@ export async function scan(
   priorityFeeLamports: number,
   solPriceUsd: number,
   onError: (symbol: string, err: unknown) => void = () => {},
+  /** If given, tokens are quoted one after another, awaiting this before each (rate-limit pacing). */
+  beforeEach?: () => Promise<void>,
 ): Promise<Opportunity[]> {
-  // All tokens at once: the scan finishes sooner, so prices are fresher.
-  // (Same number of requests; the brain paces cycles to stay under the rate limit.)
   const entries = Object.entries(tokens);
+  if (beforeEach) {
+    // One token at a time: its buy and sell quotes stay back-to-back, and
+    // requests are spread out instead of bursting.
+    const results: Opportunity[] = [];
+    for (const [symbol, mint] of entries) {
+      try {
+        await beforeEach();
+        results.push(await quoteRoundTrip(jup, symbol, mint, sizeFor(symbol), priorityFeeLamports, solPriceUsd));
+      } catch (err) {
+        onError(symbol, err);
+      }
+    }
+    return results.sort((a, b) => b.eval.netUsd - a.eval.netUsd);
+  }
+  // All tokens at once (no pacing hook).
   const settled = await Promise.allSettled(
     entries.map(([symbol, mint]) => quoteRoundTrip(jup, symbol, mint, sizeFor(symbol), priorityFeeLamports, solPriceUsd)),
   );

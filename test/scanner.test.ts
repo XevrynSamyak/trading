@@ -48,4 +48,37 @@ describe("parallel scan", () => {
     expect(errors[0]).toMatch(/^BAD: .*429/);
     expect(maxInFlight).toBe(3);
   });
+
+  it("with a pacing hook, quotes one token at a time and waits before each", async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const order: string[] = [];
+    const base = fakeFetch();
+    const fetchFn = (async (url: string) => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((r) => setTimeout(r, 5));
+      inFlight--;
+      order.push(new URL(url).searchParams.get("inputMint")!.startsWith("EPjF") ? "buy" : "sell");
+      return base(url);
+    }) as typeof fetch;
+    let waits = 0;
+    const opps = await scan(new JupiterClient("https://fake", fetchFn), { X: "X", Y: "Y" }, () => 10_000_000n, 10_000, 200, () => {}, async () => {
+      waits++;
+    });
+    expect(opps.map((o) => o.symbol)).toEqual(["X", "Y"]);
+    expect(waits).toBe(2);
+    expect(maxInFlight).toBe(1);
+    expect(order).toEqual(["buy", "sell", "buy", "sell"]); // each token's two legs stay together
+  });
+
+  it("a failing pacing hook (bot stopping) skips the token instead of crashing", async () => {
+    const errors: string[] = [];
+    const opps = await scan(new JupiterClient("https://fake", fakeFetch()), { X: "X" }, () => 10_000_000n, 10_000, 200, (s) => errors.push(s), async () => {
+      throw new Error("stopping");
+    });
+    expect(opps).toEqual([]);
+    expect(errors).toEqual(["X"]);
+  });
 });
+

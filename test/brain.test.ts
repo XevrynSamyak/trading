@@ -191,7 +191,7 @@ describe("Brain: learns the fastest safe scan pace", () => {
   it("speeds up after clean scans, slows down on a rate limit, never below the budget", () => {
     const b = new Brain(tmp(), { baseMinProfitBps: 20, minMsPerRequest: 1_035 });
     expect(b.msPerRequest).toBe(1_333);
-    for (let i = 0; i < 10; i++) b.observePace(false);
+    for (let i = 0; i < 5; i++) b.observePace(false);
     expect(b.msPerRequest).toBe(1_200);
     b.observePace(true);
     expect(b.msPerRequest).toBe(2_400);
@@ -201,17 +201,18 @@ describe("Brain: learns the fastest safe scan pace", () => {
     expect(b.scanPaceMs(2)).toBe(2_070); // focus scan of one token
   });
 
-  it("remembers its pace across restarts, and converts an older brain's per-scan pace", () => {
+  it("remembers its pace across restarts, but starts no slower than 1.5x the budget pace", () => {
     const path = tmp();
-    const b = new Brain(path, { baseMinProfitBps: 20 });
-    b.observePace(true);
+    const b = new Brain(path, { baseMinProfitBps: 20, minMsPerRequest: 1_000 });
+    b.observePace(true); // 1333 -> 2666
     b.save();
-    expect(new Brain(path, { baseMinProfitBps: 20 }).msPerRequest).toBe(2_666);
+    expect(new Brain(path, { baseMinProfitBps: 20, minMsPerRequest: 2_000 }).msPerRequest).toBe(2_666);
+    expect(new Brain(path, { baseMinProfitBps: 20, minMsPerRequest: 1_000 }).msPerRequest).toBe(1_500);
 
     const old = tmp();
     writeFileSync(old, JSON.stringify({ tokens: {}, minProfitBps: 20, totalScans: 0, paceFloorMs: 12_800 }));
-    const upgraded = new Brain(old, { baseMinProfitBps: 20 });
-    expect(upgraded.msPerRequest).toBeCloseTo(2_133.3, 1);
+    const upgraded = new Brain(old, { baseMinProfitBps: 20, minMsPerRequest: 2_000 });
+    expect(upgraded.msPerRequest).toBeCloseTo(2_133.3, 1); // converted from per-scan (12.8s / 6)
     expect("paceFloorMs" in upgraded.state).toBe(false);
   });
 });
@@ -222,7 +223,6 @@ describe("Brain: focus mode", () => {
 
   it("re-checks a moving token on its own twice, then does a full scan, while it stays hot", () => {
     const b = new Brain(tmp(), { baseMinProfitBps: 20, exploreRate: 0, minMsPerRequest: 1_035 });
-    for (let i = 0; i < 6; i++) b.observePace(false); // (not enough to change pace)
     b.observePrice("D", 1, 100, T0);
     b.observePrice("D", 1, 101, T0 + 5_000); // +1% in 5s -> hot
     const t = T0 + 6_000;

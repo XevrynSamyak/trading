@@ -100,7 +100,9 @@ const HAIRCUT_SMOOTHING = 0.3;
 /** Pace learning: start here, speed up 10% after this many clean scans, halve speed on a rate limit. */
 const START_MS_PER_REQUEST = 1_333;
 const MAX_MS_PER_REQUEST = 10_000;
-const CLEAN_SCANS_TO_SPEED_UP = 10;
+const CLEAN_SCANS_TO_SPEED_UP = 5;
+/** On restart, start no slower than this multiple of the budget's even spacing. */
+const RESTART_PACE_CAP = 1.5;
 /** Focus mode: up to this many focus scans in a row, then one full scan so nothing is ignored. */
 const FOCUS_TURNS = 2;
 const FOCUS_MAX_TOKENS = 2;
@@ -174,6 +176,9 @@ export class Brain {
       lastHot: loaded?.lastHot ?? null,
     };
     delete (this.state as { paceFloorMs?: number }).paceFloorMs;
+    // Don't drag a slow pace from an old run forever: if it is still needed,
+    // one "too many requests" re-learns it within seconds.
+    this.state.msPerRequest = Math.min(this.state.msPerRequest, this.opts.minMsPerRequest * RESTART_PACE_CAP);
     for (const s of Object.values(this.state.tokens)) {
       s.sizes ??= {};
       s.phantoms ??= 0;

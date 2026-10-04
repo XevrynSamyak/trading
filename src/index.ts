@@ -3,7 +3,14 @@ import { join } from "node:path";
 import { Connection, PublicKey, type Keypair } from "@solana/web3.js";
 import { Brain, type SizeBucket } from "./brain.js";
 import { RequestBudget, budgetedFetch } from "./budget.js";
-import { TOKENS_PER_SCAN, extraFeeLamports, loadConfig, maxScansPerMin, tradeSizeUsd } from "./config.js";
+import {
+  TOKENS_PER_SCAN,
+  extraFeeLamports,
+  jupiterRateWindows,
+  loadConfig,
+  maxScansPerMin,
+  tradeSizeUsd,
+} from "./config.js";
 import { discoverTokens } from "./discovery.js";
 import { liveExecute, paperExecute, simulateExecute, type ExecResult } from "./executor.js";
 import { JitoClient } from "./jito.js";
@@ -44,9 +51,9 @@ async function main() {
     process.exit(1);
   }
 
-  // Every Jupiter request goes through one counter, so no 60s window ever exceeds the limit
-  // (2 requests of slack, since network delays can bunch requests up on Jupiter's side).
-  const budget = new RequestBudget(Math.max(1, cfg.jupiterRpm - 2));
+  // Every Jupiter request goes through one counter covering a 60s and a 10s window, and the
+  // bot waits for room before each request group, so it never bursts over Jupiter's limits.
+  const budget = new RequestBudget(jupiterRateWindows(cfg.jupiterRpm));
   const jupFetch = budgetedFetch(budget);
   const jup = new JupiterClient(cfg.jupiterApi, jupFetch, cfg.jupiterApiKey);
   const conn = new Connection(cfg.rpcUrl, "confirmed");
@@ -93,6 +100,11 @@ async function main() {
     }
   };
   const pickTip = () => (tipAccounts.length ? tipAccounts[Math.floor(Math.random() * tipAccounts.length)] : undefined);
+
+  const waitForJupiter = async (requests: number) => {
+    const ms = budget.waitFor(requests);
+    if (ms > 0 && running) await sleep(ms);
+  };
 
   let solPrice = await fetchSolPriceUsd(jup);
   let solPriceAt = Date.now();
@@ -160,6 +172,7 @@ async function main() {
       if (cfg.tokenDiscovery && now - discoveredAt > DISCOVERY_INTERVAL_MS) {
         discoveredAt = now;
         try {
+          await waitForJupiter(1);
           const found = await discoverTokens(
             cfg.jupiterTokensApi,
             { minLiquidityUsd: cfg.minTokenLiquidityUsd, limit: cfg.maxTokens },
@@ -175,6 +188,7 @@ async function main() {
       await refreshTipAccounts();
 
       if (now - solPriceAt > SOL_PRICE_REFRESH_MS) {
+        await waitForJupiter(1);
         solPrice = await fetchSolPriceUsd(jup);
         solPriceAt = now;
       }
@@ -240,10 +254,6 @@ async function main() {
       }
 
       const tokens = brain.pickTokens(brain.tokenPool(cfg.tokens));
-      // Hard guarantee: wait until this scan's requests fit in the 60s window.
-      const roomInMs = budget.waitFor(Object.keys(tokens).length * 2);
-      if (roomInMs > 0) await sleep(roomInMs);
-      if (!running) break;
       scanTimes.push(Date.now());
       const buckets: Record<string, SizeBucket> = {};
       const sizeFor = (sym: string) => {
@@ -251,10 +261,23 @@ async function main() {
         buckets[sym] = pick.bucket;
         return usdToUsdcAtoms(pick.usd);
       };
-      const opps = await scan(jup, tokens, sizeFor, extraLamports, solPrice, (sym, err) => {
-        if (String(err).includes(" 429")) rateLimited = true;
-        console.warn(`quote ${sym} failed: ${String(err).slice(0, 120)}`);
-      });
+      const opps = await scan(
+        jup,
+        tokens,
+        sizeFor,
+        extraLamports,
+        solPrice,
+        (sym, err) => {
+          if (!running) return; // stopping: skip the remaining quotes quietly
+          if (String(err).includes(" 429")) rateLimited = true;
+          console.warn(`quote ${sym} failed: ${String(err).slice(0, 120)}`);
+        },
+        // Each token costs 2 requests; wait until they fit in every rate window.
+        async () => {
+          await waitForJupiter(2);
+          if (!running) throw new Error("stopping");
+        },
+      );
       for (const o of opps) {
         brain.observeScan(o.symbol, o.eval.netBps, o.eval.netUsd, buckets[o.symbol]);
         const wasHot = brain.isHot(o.symbol);
@@ -280,6 +303,8 @@ async function main() {
       if (best && brain.shouldAttempt(best.symbol, best.eval.netBps)) {
         const deps = { conn, jup, cfg, solPriceUsd: solPrice, tipAccount: pickTip() };
         let result: ExecResult;
+        // Building a real transaction re-quotes once and fetches two sets of swap instructions.
+        if (simulateAs || cfg.mode === "live") await waitForJupiter(3);
         if (cfg.mode === "live" && wallet) result = await liveExecute(best, wallet, { ...deps, jito });
         else if (simulateAs) result = await simulateExecute(best, simulateAs, deps);
         else result = paperExecute(best);

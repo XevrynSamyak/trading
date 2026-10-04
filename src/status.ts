@@ -100,10 +100,12 @@ export function renderStatus(i: StatusInput): string {
       );
     }
     if (live.scansLastMin !== undefined && live.jupiterLimit) {
-      out.push(
-        `Speed:   ${live.scansLastMin} scans in the last minute  ` +
-          dim(`(Jupiter: ${live.jupiterUsed ?? 0}/${live.jupiterLimit} requests used per minute)`),
-      );
+      const upMs = i.now - live.startedAt;
+      const scans =
+        upMs < 60_000
+          ? `${live.scansLastMin} scans so far (started ${duration(upMs)} ago)`
+          : `${live.scansLastMin} scans in the last minute`;
+      out.push(`Speed:   ${scans}  ` + dim(`(Jupiter: ${live.jupiterUsed ?? 0}/${live.jupiterLimit} requests used per minute)`));
     } else if (live.paceFloorMs) {
       out.push(`Speed:   ~${(60_000 / live.paceFloorMs).toFixed(1)} scans/min`);
     }
