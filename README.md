@@ -95,6 +95,9 @@ that token (2 requests), re-checking it about every 2 seconds, with a full
 scan every third time so nothing else is ignored. Wallet balances (Helius)
 are read at most once a minute to stay well inside the free RPC plan.
 
+Two phones with separate Jupiter accounts can split the tokens between them
+(`SHARD=1/2` and `SHARD=2/2`); see `deploy/ANDROID.md`.
+
 ## Limits
 
 There is **no profit cap**. Trade size is a share of the wallet

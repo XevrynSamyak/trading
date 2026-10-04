@@ -135,6 +135,26 @@ Stop it: `pkill -f termux-run.sh; pkill -f src/index.ts`
 Running `termux-run.sh` again while the bot is running is safe: it just
 says it's already running.
 
+## Running on two phones
+
+Two phones only help if each has **its own Jupiter limit**, which means a key
+from a separate Jupiter account (keys from the same account share one limit).
+Check Jupiter's terms first: using extra accounts to get around a rate limit
+may not be allowed, and could get the keys blocked.
+
+1. Set up phone 2 exactly like phone 1 (steps 1–4 above). It can use the same
+   Helius key.
+2. Put phone 2's own Jupiter key in its `.env`:
+   `echo "JUPITER_API_KEY=PASTE_PHONE_2_KEY" >> .env`
+3. Split the tokens so the phones don't watch the same ones:
+   - phone 1: `echo "SHARD=1/2" >> .env`
+   - phone 2: `echo "SHARD=2/2" >> .env`
+4. Restart the bot on both phones. `npm run watch` shows a
+   `Phone: 1 of 2, watching 3 of 6 tokens` line.
+
+Each phone keeps its own results (`npm run report` on each). Never let two
+phones trade live from the same wallet: give each its own wallet and money.
+
 ## Safety
 
 - Lock the phone with a PIN. The `.env` file holds the bot wallet's key.

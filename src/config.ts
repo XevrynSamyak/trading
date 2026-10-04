@@ -16,6 +16,57 @@ export const DEFAULT_TOKENS: Record<string, string> = {
 
 export type Mode = "paper" | "live";
 
+/** For running on several phones: this phone's number and how many phones there are. */
+export interface Shard {
+  index: number;
+  count: number;
+}
+
+/** Parses SHARD like "1/2" (phone 1 of 2). Empty means a single phone. */
+export function parseShard(raw: string | undefined): Shard {
+  if (!raw || !raw.trim()) return { index: 1, count: 1 };
+  const m = raw.trim().match(/^(\d+)\s*\/\s*(\d+)$/);
+  if (!m) throw new Error(`SHARD must look like 1/2 (this phone's number / how many phones), got "${raw}"`);
+  const index = Number(m[1]);
+  const count = Number(m[2]);
+  if (count < 1 || index < 1 || index > count) {
+    throw new Error(`SHARD ${raw}: the first number must be between 1 and ${count}`);
+  }
+  return { index, count };
+}
+
+/** FNV-1a: a stable hash, so a found token always belongs to the same phone. */
+function stableHash(s: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h;
+}
+
+/**
+ * The tokens this phone watches when several phones split the work. The
+ * configured list is dealt out in turn (same list on every phone, so an even
+ * split); tokens the brain found by itself go by a stable hash of their
+ * address, so phones agree even if they found different extra tokens.
+ */
+export function shardTokens(
+  configured: Record<string, string>,
+  discovered: Record<string, string>,
+  shard: Shard,
+): Record<string, string> {
+  const mine = (i: number) => i % shard.count === shard.index - 1;
+  const out: Record<string, string> = {};
+  for (const [sym, mint] of Object.entries(discovered)) {
+    if (shard.count === 1 || mine(stableHash(mint))) out[sym] = mint;
+  }
+  Object.entries(configured).forEach(([sym, mint], i) => {
+    if (shard.count === 1 || mine(i)) out[sym] = mint;
+  });
+  return out;
+}
+
 /** Tokens quoted per scan; each needs 2 Jupiter requests (buy leg + sell leg). */
 export const TOKENS_PER_SCAN = 3;
 export const REQUESTS_PER_SCAN = TOKENS_PER_SCAN * 2;
@@ -85,6 +136,8 @@ export interface Config {
   jitoUrl: string;
   jitoTipLamports: number;
   tokens: Record<string, string>;
+  /** Which part of the token list this phone watches (SHARD=1/2 etc.). */
+  shard: Shard;
   /** Fraction of the wallet's USDC used per trade; trades grow as the wallet grows. */
   tradeSizePct: number;
   /** Optional ceiling per trade in USD; 0 = no ceiling. */
@@ -163,6 +216,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     jitoUrl: (env.JITO_URL || "https://mainnet.block-engine.jito.wtf/api/v1").replace(/\/$/, ""),
     jitoTipLamports: num(env, "JITO_TIP_LAMPORTS", 10_000),
     tokens,
+    shard: parseShard(env.SHARD),
     tradeSizePct: num(env, "TRADE_SIZE_PCT", 0.8),
     maxTradeUsd: num(env, "MAX_TRADE_USD", 0),
     minProfitBps: num(env, "MIN_PROFIT_BPS", 20),

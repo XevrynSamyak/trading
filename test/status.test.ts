@@ -43,6 +43,12 @@ describe("status screen", () => {
     expect(renderStatus({ ...base, live: null, processAlive: false })).toContain("NOT STARTED YET");
   });
 
+  it("shows which share of the tokens this phone watches", () => {
+    const text = renderStatus({ ...base, live: { ...base.live!, shard: "2/2", watching: 4, totalTokens: 9 } });
+    expect(text).toContain("Phone:   2 of 2, watching 4 of 9 tokens");
+    expect(renderStatus(base)).not.toContain("Phone:");
+  });
+
   it("shows pauses with their reason", () => {
     const text = renderStatus({ ...base, live: { ...base.live!, state: "paused", note: "daily loss limit reached" } });
     expect(text).toContain("Doing:   paused: daily loss limit reached");

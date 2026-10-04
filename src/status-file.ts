@@ -21,6 +21,10 @@ export interface LiveStatus {
   nextScanInMs: number;
   /** Fastest safe pace the brain has learned for a full scan (ms). */
   paceFloorMs?: number;
+  /** With several phones: this phone's share ("1/2") and how many tokens it watches of all known. */
+  shard?: string;
+  watching?: number;
+  totalTokens?: number;
   /** Tokens getting focus scans right now (moving fast or nearly a gap). */
   focus?: string[];
   /** Jupiter requests sent in the last 60s, and the per-minute limit. */
