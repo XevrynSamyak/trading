@@ -109,13 +109,6 @@ export function renderStatus(i: StatusInput): string {
     } else if (live.paceFloorMs) {
       out.push(`Speed:   ~${(60_000 / live.paceFloorMs).toFixed(1)} scans/min`);
     }
-    if (live.shard) {
-      const [n, of] = live.shard.split("/");
-      out.push(
-        `Phone:   ${n} of ${of}, watching ${live.watching ?? "?"} of ${live.totalTokens ?? "?"} tokens ` +
-          dim("(the other phone watches the rest)"),
-      );
-    }
     if (live.focus?.length) {
       out.push(`Focus:   ${yellow(live.focus.join(", "))} ${dim("(re-checking just this every few seconds)")}`);
     }

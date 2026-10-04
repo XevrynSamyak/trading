@@ -9,7 +9,6 @@ import {
   jupiterRateWindows,
   loadConfig,
   maxScansPerMin,
-  shardTokens,
   tradeSizeUsd,
 } from "./config.js";
 import { discoverTokens } from "./discovery.js";
@@ -163,13 +162,6 @@ async function main() {
       `so up to ~${maxScansPerMin(cfg.jupiterMsPerRequest).toFixed(1)} full scans/min, ` +
       `or ~${maxScansPerMin(cfg.jupiterMsPerRequest, 2).toFixed(0)} focus scans/min on a moving token`,
   );
-  if (cfg.shard.count > 1) {
-    const mine = Object.keys(shardTokens(cfg.tokens, brain.state.discovered, cfg.shard));
-    console.log(
-      `Phone ${cfg.shard.index} of ${cfg.shard.count}: watching ${mine.join(", ")} ` +
-        `(plus its share of tokens it finds); the other phone(s) watch the rest`,
-    );
-  }
 
   while (running) {
     const now = Date.now();
@@ -261,9 +253,7 @@ async function main() {
         continue;
       }
 
-      // With several phones, each watches its own share of the tokens.
-      const pool = shardTokens(cfg.tokens, brain.state.discovered, cfg.shard);
-      const tokens = brain.pickTokens(pool);
+      const tokens = brain.pickTokens(brain.tokenPool(cfg.tokens));
       scanTimes.push(Date.now());
       const buckets: Record<string, SizeBucket> = {};
       const sizeFor = (sym: string) => {
@@ -361,9 +351,6 @@ async function main() {
         tradeSizeUsd: sizeUsd,
         paceFloorMs: brain.paceFloorMs,
         focus,
-        shard: cfg.shard.count > 1 ? `${cfg.shard.index}/${cfg.shard.count}` : undefined,
-        watching: Object.keys(pool).length,
-        totalTokens: Object.keys(brain.tokenPool(cfg.tokens)).length,
         jupiterUsed: budget.used(),
         jupiterLimit: cfg.jupiterRpm,
         scansLastMin: scansInLastMinute(),
