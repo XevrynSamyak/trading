@@ -6,11 +6,14 @@
   "description": "Small self-accounting Solana DEX arbitrage bot (paper mode by default)",
   "scripts": {
     "start": "tsx src/index.ts",
+    "check": "tsx src/check.ts",
     "report": "tsx src/report-cli.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
     "@solana/web3.js": "^1.98.0",
     "bs58": "^6.0.0",

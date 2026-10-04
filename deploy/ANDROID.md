@@ -34,8 +34,19 @@ cp .env.example .env
 nano .env        # edit settings; Ctrl+O to save, Ctrl+X to exit
 ```
 
-Leave `MODE=paper` for now. Get a free RPC key at helius.dev and set
-`RPC_URL` (the public one is slow and rate-limited).
+Leave `MODE=paper` for now. Paste your Helius URL into `.env`:
+
+```
+RPC_URL=https://mainnet.helius-rpc.com/?api-key=YOUR_KEY
+```
+
+Then check everything connects:
+
+```bash
+npm run check
+```
+
+Every line should say `OK` (Wallet says `SKIP` until you add one).
 
 ## 4. Start it
 
