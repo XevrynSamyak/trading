@@ -190,3 +190,26 @@ describe("wallet value", () => {
     expect(walletValueUsd(b, 100)).toBeCloseTo(20 + 0.05203928 * 100, 6);
   });
 });
+
+describe("balance cache (saves RPC credits)", () => {
+  it("reads balances at most once a minute, and again right after invalidate()", async () => {
+    const { BalanceCache } = await import("../src/wallet.js");
+    const conn = fakeConn({ usdcBefore: 5_000_000n, usdcAfter: 5_000_000n, lamportsBefore: 1, lamportsAfter: 1, lands: false });
+    let reads = 0;
+    const orig = conn.getBalance.bind(conn);
+    (conn as unknown as { getBalance: typeof orig }).getBalance = async (...a: Parameters<typeof orig>) => {
+      reads++;
+      return orig(...a);
+    };
+    const cache = new BalanceCache(conn, Keypair.generate().publicKey, 60_000);
+    await cache.get(0);
+    await cache.get(30_000);
+    await cache.get(59_999);
+    expect(reads).toBe(1);
+    await cache.get(60_000);
+    expect(reads).toBe(2);
+    cache.invalidate();
+    await cache.get(60_001);
+    expect(reads).toBe(3);
+  });
+});

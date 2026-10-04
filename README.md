@@ -80,6 +80,15 @@ dropped and **costs nothing**. The tip (`JITO_TIP_LAMPORTS`) is only paid
 when it lands, and it can only land at a profit. Every trade is also
 simulated first, for free, so doomed attempts are never sent.
 
+## Speed and API limits
+
+Prices come from Jupiter, which allows **30 requests/min without a key** and
+**60 with a free key** (`JUPITER_API_KEY`). Each scan uses 6 requests, so the
+bot scans at most ~3.7 times a minute without a key and ~8.7 with one; it
+paces itself to never exceed the limit in any 60-second window. Wallet
+balances (Helius) are read at most once a minute to stay well inside the free
+RPC plan.
+
 ## Limits
 
 There is **no profit cap**. Trade size is a share of the wallet

@@ -1,5 +1,5 @@
 import { USDC_MINT } from "./config.js";
-import type { FetchFn } from "./jupiter.js";
+import { jupiterHeaders, type FetchFn } from "./jupiter.js";
 
 /**
  * Finds actively traded, verified tokens via Jupiter's token API so the brain
@@ -43,8 +43,9 @@ export async function discoverTokens(
   tokensApi: string,
   opts: DiscoveryOptions,
   fetchFn: FetchFn = fetch,
+  apiKey?: string,
 ): Promise<Record<string, string>> {
-  const res = await fetchFn(`${tokensApi}/toptraded/1h?limit=50`);
+  const res = await fetchFn(`${tokensApi}/toptraded/1h?limit=50`, { headers: jupiterHeaders(apiKey) });
   if (!res.ok) throw new Error(`Jupiter tokens ${res.status}: ${(await res.text()).slice(0, 120)}`);
   return parseTopTokens(await res.json(), opts);
 }

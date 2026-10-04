@@ -31,7 +31,7 @@ async function main() {
   console.log(`RPC:  ${maskUrl(cfg.rpcUrl)}\n`);
 
   const conn = new Connection(cfg.rpcUrl, "confirmed");
-  const jup = new JupiterClient(cfg.jupiterApi);
+  const jup = new JupiterClient(cfg.jupiterApi, fetch, cfg.jupiterApiKey);
   let solPrice = 0;
 
   const results = [
@@ -40,8 +40,19 @@ async function main() {
       return `slot ${slot}, solana-core ${version["solana-core"]}`;
     }),
     await step("Jupiter", async () => {
-      solPrice = await fetchSolPriceUsd(jup);
-      return `SOL = $${solPrice.toFixed(2)}`;
+      try {
+        solPrice = await fetchSolPriceUsd(jup);
+      } catch (err) {
+        if (cfg.jupiterApiKey && /Jupiter quote (401|403)/.test(String(err))) {
+          throw new Error("Jupiter rejected your API key: check JUPITER_API_KEY in .env (copy it again from the portal)");
+        }
+        throw err;
+      }
+      const keyNote = cfg.jupiterApiKey ? "with your API key" : "no API key";
+      return (
+        `SOL = $${solPrice.toFixed(2)} (${keyNote}: ${cfg.jupiterRpm} requests/min, ` +
+        `up to ~${(60_000 / cfg.minScanIntervalMs).toFixed(1)} scans/min)`
+      );
     }),
   ];
 

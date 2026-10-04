@@ -28,10 +28,16 @@ export interface SwapInstructionsResponse {
 
 export type FetchFn = typeof fetch;
 
+/** Headers for Jupiter requests: the API key goes in `x-api-key` (never in the URL or logs). */
+export function jupiterHeaders(apiKey: string | undefined, extra: Record<string, string> = {}): Record<string, string> {
+  return apiKey ? { ...extra, "x-api-key": apiKey } : extra;
+}
+
 export class JupiterClient {
   constructor(
     private readonly baseUrl: string,
     private readonly fetchFn: FetchFn = fetch,
+    private readonly apiKey?: string,
   ) {}
 
   async quote(params: {
@@ -50,7 +56,7 @@ export class JupiterClient {
     });
     // Keeps each leg small enough that both legs fit in one transaction.
     if (params.maxAccounts) qs.set("maxAccounts", String(params.maxAccounts));
-    const res = await this.fetchFn(`${this.baseUrl}/quote?${qs}`);
+    const res = await this.fetchFn(`${this.baseUrl}/quote?${qs}`, { headers: jupiterHeaders(this.apiKey) });
     if (!res.ok) throw new Error(`Jupiter quote ${res.status}: ${await res.text()}`);
     return (await res.json()) as QuoteResponse;
   }
@@ -58,7 +64,7 @@ export class JupiterClient {
   async swapInstructions(quote: QuoteResponse, userPublicKey: string): Promise<SwapInstructionsResponse> {
     const res = await this.fetchFn(`${this.baseUrl}/swap-instructions`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: jupiterHeaders(this.apiKey, { "Content-Type": "application/json" }),
       body: JSON.stringify({
         quoteResponse: quote,
         userPublicKey,

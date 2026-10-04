@@ -101,7 +101,7 @@ export function renderStatus(i: StatusInput): string {
     }
     if (live.paceFloorMs) {
       out.push(
-        `Speed:   ~${Math.round(60_000 / Math.max(live.paceFloorMs, live.nextScanInMs || live.paceFloorMs))} scans/min ` +
+        `Speed:   ~${(60_000 / Math.max(live.paceFloorMs, live.nextScanInMs || live.paceFloorMs)).toFixed(1)} scans/min ` +
           dim(`(fastest safe pace learned so far: every ${(live.paceFloorMs / 1000).toFixed(1)}s)`),
       );
     }

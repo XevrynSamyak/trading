@@ -65,7 +65,21 @@ cp deploy/termux-boot.sh ~/.termux/boot/start-arb-bot
 chmod +x ~/.termux/boot/start-arb-bot
 ```
 
-## 5. Make the test realistic (recommended)
+## 5. Scan twice as fast with a free Jupiter key (recommended)
+
+Without a key, Jupiter allows 30 price requests a minute (about 4 scans a
+minute). A free key from Jupiter's developer portal doubles that. Put it in
+`.env` yourself; never paste it into a chat or the code:
+
+```bash
+echo "JUPITER_API_KEY=PASTE_YOUR_KEY_HERE" >> .env
+npm run check
+```
+
+The Jupiter line should end with `with your API key: 60 requests/min`.
+Restart the bot afterwards (see "Stop it" below).
+
+## 5b. Make the test realistic (recommended)
 
 Quote-only paper results are too optimistic. To have the bot test every
 trade on the real chain (nothing is sent, no secret key needed):

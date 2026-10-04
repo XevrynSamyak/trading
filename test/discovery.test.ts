@@ -29,3 +29,15 @@ describe("token discovery", () => {
     await expect(discoverTokens("https://fake", opts, fetchFn)).rejects.toThrow(/429/);
   });
 });
+
+describe("token discovery with an API key", () => {
+  it("sends the key header", async () => {
+    let headers: Record<string, string> = {};
+    const fetchFn = (async (_url: string, init?: RequestInit) => {
+      headers = (init?.headers ?? {}) as Record<string, string>;
+      return new Response("[]");
+    }) as typeof fetch;
+    await discoverTokens("https://api.jup.ag/tokens/v2", opts, fetchFn, "k123");
+    expect(headers["x-api-key"]).toBe("k123");
+  });
+});

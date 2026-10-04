@@ -2,7 +2,7 @@ import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Connection, PublicKey, type Keypair } from "@solana/web3.js";
 import { Brain, type SizeBucket } from "./brain.js";
-import { extraFeeLamports, loadConfig, tradeSizeUsd } from "./config.js";
+import { TOKENS_PER_SCAN, extraFeeLamports, loadConfig, tradeSizeUsd } from "./config.js";
 import { discoverTokens } from "./discovery.js";
 import { liveExecute, paperExecute, simulateExecute, type ExecResult } from "./executor.js";
 import { JitoClient } from "./jito.js";
@@ -14,7 +14,7 @@ import { RiskManager } from "./risk.js";
 import { fetchSolPriceUsd, scan } from "./scanner.js";
 import { writeStatus, type LiveStatus } from "./status-file.js";
 import { formatVerdict, monthVerdict, shouldRetire } from "./sustain.js";
-import { getBalances, loadKeypair, walletValueUsd } from "./wallet.js";
+import { BalanceCache, loadKeypair, walletValueUsd } from "./wallet.js";
 
 const SOL_PRICE_REFRESH_MS = 5 * 60_000;
 const DISCOVERY_INTERVAL_MS = 6 * 60 * 60_000;
@@ -43,7 +43,7 @@ async function main() {
     process.exit(1);
   }
 
-  const jup = new JupiterClient(cfg.jupiterApi);
+  const jup = new JupiterClient(cfg.jupiterApi, fetch, cfg.jupiterApiKey);
   const conn = new Connection(cfg.rpcUrl, "confirmed");
   const wallet: Keypair | undefined = cfg.walletSecretKey ? loadKeypair(cfg.walletSecretKey) : undefined;
   // Paper mode only needs the public address to test trades on-chain.
@@ -53,7 +53,9 @@ async function main() {
   const brain = new Brain(join(cfg.dataDir, `brain-${cfg.mode}.json`), {
     baseMinProfitBps: cfg.minProfitBps,
     minIntervalMs: cfg.minScanIntervalMs,
+    tokensPerCycle: TOKENS_PER_SCAN,
   });
+  const balanceCache = owner ? new BalanceCache(conn, owner) : undefined;
   const risk = new RiskManager(cfg);
   const extraLamports = extraFeeLamports(cfg);
 
@@ -132,6 +134,10 @@ async function main() {
       (owner ? `. Wallet ${owner.toBase58()}` : "") +
       `. Loss floor $${cfg.lossFloorUsd}, no profit cap. SOL=$${solPrice.toFixed(2)}`,
   );
+  console.log(
+    `Jupiter: ${cfg.jupiterApiKey ? "using your API key" : "no API key"} (${cfg.jupiterRpm} requests/min), ` +
+      `so at most ~${(60_000 / cfg.minScanIntervalMs).toFixed(1)} scans/min`,
+  );
 
   while (running) {
     const now = Date.now();
@@ -142,10 +148,12 @@ async function main() {
       if (cfg.tokenDiscovery && now - discoveredAt > DISCOVERY_INTERVAL_MS) {
         discoveredAt = now;
         try {
-          const found = await discoverTokens(cfg.jupiterTokensApi, {
-            minLiquidityUsd: cfg.minTokenLiquidityUsd,
-            limit: cfg.maxTokens,
-          });
+          const found = await discoverTokens(
+            cfg.jupiterTokensApi,
+            { minLiquidityUsd: cfg.minTokenLiquidityUsd, limit: cfg.maxTokens },
+            fetch,
+            cfg.jupiterApiKey,
+          );
           const added = brain.learnTokens(found, cfg.tokens, cfg.maxTokens);
           if (added.length) console.log(`brain found new tokens to watch: ${added.join(", ")}`);
         } catch (err) {
@@ -183,8 +191,8 @@ async function main() {
       let valueUsd = paperValue;
       let usdcUsd = paperValue;
       let simulateAs: PublicKey | undefined;
-      if (owner) {
-        const b = await getBalances(conn, owner);
+      if (owner && balanceCache) {
+        const b = await balanceCache.get();
         const realUsdc = Number(b.usdcAtoms) / 1e6;
         if (cfg.mode === "live") {
           valueUsd = walletValueUsd(b, solPrice);
@@ -272,6 +280,8 @@ async function main() {
           verified: result.verified,
         });
         brain.observeTrade(best.symbol, result.status, result.netUsd);
+        // A landed trade moved real money: read fresh balances next cycle.
+        if (cfg.mode === "live" && (result.status === "filled" || result.status === "failed")) balanceCache?.invalidate();
         if (result.verified && (result.status === "filled" || result.status === "rejected")) {
           const realBps = result.status === "filled" ? (result.netUsd / best.eval.inUsd) * 10_000 : 0;
           brain.observeReality(best.symbol, best.eval.netBps, realBps);

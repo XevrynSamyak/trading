@@ -16,10 +16,47 @@ export const DEFAULT_TOKENS: Record<string, string> = {
 
 export type Mode = "paper" | "live";
 
+/** Tokens quoted per scan; each needs 2 Jupiter requests (buy leg + sell leg). */
+export const TOKENS_PER_SCAN = 3;
+export const REQUESTS_PER_SCAN = TOKENS_PER_SCAN * 2;
+
+/**
+ * Jupiter's limits (per minute, across all its APIs): 30 without a key,
+ * 60 with a free key. lite-api.jup.ag is keyless-only and being retired, so
+ * with a key the bot uses api.jup.ag, which reads the key from `x-api-key`.
+ */
+export const JUPITER_KEYLESS_RPM = 30;
+export const JUPITER_FREE_KEY_RPM = 60;
+
+/** Room left each minute for requests outside scans (SOL price, token list). */
+const EXTRA_REQUESTS_PER_MIN = 2;
+
+/**
+ * Fastest scan pace that can never exceed the per-minute limit. Jupiter
+ * counts any 60-second window, and one that starts just before a scan holds
+ * (60/T + 1) scans, so: (60/T + 1) * REQUESTS_PER_SCAN + extras <= limit.
+ */
+export function jupiterScanBudgetMs(requestsPerMinute: number): number {
+  const spare = requestsPerMinute - EXTRA_REQUESTS_PER_MIN - REQUESTS_PER_SCAN;
+  if (spare <= 0) return 60_000;
+  return Math.ceil((60_000 * REQUESTS_PER_SCAN) / spare);
+}
+
+/** lite-api ignores API keys, so a key only helps on api.jup.ag. */
+function jupiterUrl(configured: string | undefined, fallbackPath: string, apiKey: string | undefined): string {
+  const host = apiKey ? "https://api.jup.ag" : "https://lite-api.jup.ag";
+  const url = (configured || `${host}${fallbackPath}`).replace(/\/$/, "");
+  return apiKey ? url.replace("://lite-api.jup.ag", "://api.jup.ag") : url;
+}
+
 export interface Config {
   mode: Mode;
   rpcUrl: string;
   jupiterApi: string;
+  /** Free key from Jupiter's developer portal: doubles the request limit. */
+  jupiterApiKey?: string;
+  /** Jupiter requests allowed per minute (30 keyless, 60 free key, more on paid plans). */
+  jupiterRpm: number;
   walletSecretKey?: string;
   /** Public address only: lets paper mode test trades on-chain without the secret key. */
   walletPublicKey?: string;
@@ -41,7 +78,10 @@ export interface Config {
   maxConsecutiveFailures: number;
   failureCooldownMs: number;
   scanIntervalMs: number;
-  /** The absolute fastest the bot may scan; it learns the real safe pace above this. */
+  /**
+   * Fastest the bot may ever scan: the larger of MIN_SCAN_INTERVAL_MS and what
+   * the Jupiter request budget allows. It learns the real safe pace above this.
+   */
   minScanIntervalMs: number;
   monthlyCostsUsd: Record<string, number>;
   sustainStopAfterMonths: number;
@@ -85,6 +125,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 
   const startingBalanceUsd = num(env, "STARTING_BALANCE_USD", 25);
   const sendVia = env.SEND_VIA === "rpc" ? "rpc" : "jito";
+  const jupiterApiKey = env.JUPITER_API_KEY?.trim() || undefined;
+  const jupiterRpm = num(env, "JUPITER_RPM", jupiterApiKey ? JUPITER_FREE_KEY_RPM : JUPITER_KEYLESS_RPM);
   const tokens = env.TOKENS ? parsePairs(env.TOKENS) : DEFAULT_TOKENS;
   const costs = Object.fromEntries(
     Object.entries(parsePairs(env.MONTHLY_COSTS_USD ?? "server:0,rpc:0")).map(([k, v]) => [k, Number(v)]),
@@ -93,7 +135,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const cfg: Config = {
     mode,
     rpcUrl: env.RPC_URL || "https://api.mainnet-beta.solana.com",
-    jupiterApi: (env.JUPITER_API || "https://lite-api.jup.ag/swap/v1").replace(/\/$/, ""),
+    jupiterApi: jupiterUrl(env.JUPITER_API, "/swap/v1", jupiterApiKey),
+    jupiterApiKey,
+    jupiterRpm,
     walletSecretKey: env.WALLET_SECRET_KEY || undefined,
     walletPublicKey: env.WALLET_PUBLIC_KEY || undefined,
     sendVia,
@@ -112,11 +156,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     maxConsecutiveFailures: num(env, "MAX_CONSECUTIVE_FAILURES", 5),
     failureCooldownMs: num(env, "FAILURE_COOLDOWN_MS", 10 * 60_000),
     scanIntervalMs: num(env, "SCAN_INTERVAL_MS", 5_000),
-    minScanIntervalMs: num(env, "MIN_SCAN_INTERVAL_MS", 2_000),
+    minScanIntervalMs: Math.max(num(env, "MIN_SCAN_INTERVAL_MS", 1_000), jupiterScanBudgetMs(jupiterRpm)),
     monthlyCostsUsd: costs,
     sustainStopAfterMonths: num(env, "SUSTAIN_STOP_AFTER_MONTHS", 2),
     tokenDiscovery: env.TOKEN_DISCOVERY !== "off",
-    jupiterTokensApi: (env.JUPITER_TOKENS_API || "https://lite-api.jup.ag/tokens/v2").replace(/\/$/, ""),
+    jupiterTokensApi: jupiterUrl(env.JUPITER_TOKENS_API, "/tokens/v2", jupiterApiKey),
     maxTokens: num(env, "MAX_TOKENS", 12),
     minTokenLiquidityUsd: num(env, "MIN_TOKEN_LIQUIDITY_USD", 1_000_000),
     telegramBotToken: env.TELEGRAM_BOT_TOKEN || undefined,

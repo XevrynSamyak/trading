@@ -52,3 +52,29 @@ export function tokenAmountFromData(data: Buffer): bigint {
   if (data.length < 72) throw new Error(`not a token account (${data.length} bytes)`);
   return data.readBigUInt64LE(64);
 }
+
+/**
+ * Reads balances at most once per `maxAgeMs` (default 1 minute) to save RPC
+ * credits: the free Helius plan has a monthly limit, and in paper mode the
+ * balance barely changes. Call invalidate() after anything that moves money.
+ */
+export class BalanceCache {
+  private cached?: { balances: Balances; at: number };
+
+  constructor(
+    private readonly conn: Connection,
+    private readonly owner: PublicKey,
+    private readonly maxAgeMs = 60_000,
+  ) {}
+
+  async get(now = Date.now()): Promise<Balances> {
+    if (!this.cached || now - this.cached.at >= this.maxAgeMs) {
+      this.cached = { balances: await getBalances(this.conn, this.owner), at: now };
+    }
+    return this.cached.balances;
+  }
+
+  invalidate(): void {
+    this.cached = undefined;
+  }
+}
