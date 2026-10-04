@@ -1,8 +1,9 @@
 import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Connection, type Keypair } from "@solana/web3.js";
-import { Brain } from "./brain.js";
+import { Brain, type SizeBucket } from "./brain.js";
 import { loadConfig, tradeSizeUsd } from "./config.js";
+import { discoverTokens } from "./discovery.js";
 import { liveExecute, paperExecute, type ExecResult } from "./executor.js";
 import { JupiterClient } from "./jupiter.js";
 import { Ledger, startOfUtcDay, startOfUtcMonth } from "./ledger.js";
@@ -14,6 +15,7 @@ import { formatVerdict, monthVerdict, shouldRetire } from "./sustain.js";
 import { getBalances, loadKeypair, walletValueUsd } from "./wallet.js";
 
 const SOL_PRICE_REFRESH_MS = 5 * 60_000;
+const DISCOVERY_INTERVAL_MS = 6 * 60 * 60_000;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 async function main() {
@@ -48,6 +50,7 @@ async function main() {
 
   let solPrice = await fetchSolPriceUsd(jup);
   let solPriceAt = Date.now();
+  let discoveredAt = 0;
   let lastDay = startOfUtcDay(Date.now());
   let lastMonth = startOfUtcMonth(Date.now());
 
@@ -59,7 +62,22 @@ async function main() {
 
   while (running) {
     const now = Date.now();
+    let nextWaitMs = cfg.scanIntervalMs;
     try {
+      if (cfg.tokenDiscovery && now - discoveredAt > DISCOVERY_INTERVAL_MS) {
+        discoveredAt = now;
+        try {
+          const found = await discoverTokens(cfg.jupiterTokensApi, {
+            minLiquidityUsd: cfg.minTokenLiquidityUsd,
+            limit: cfg.maxTokens,
+          });
+          const added = brain.learnTokens(found, cfg.tokens, cfg.maxTokens);
+          if (added.length) console.log(`brain found new tokens to watch: ${added.join(", ")}`);
+        } catch (err) {
+          console.warn(`token discovery failed (keeps current list): ${String(err).slice(0, 120)}`);
+        }
+      }
+
       if (now - solPriceAt > SOL_PRICE_REFRESH_MS) {
         solPrice = await fetchSolPriceUsd(jup);
         solPriceAt = now;
@@ -108,16 +126,22 @@ async function main() {
         continue;
       }
 
-      const tokens = brain.pickTokens(cfg.tokens);
-      const opps = await scan(jup, tokens, usdToUsdcAtoms(sizeUsd), cfg.priorityFeeLamports, solPrice, (sym, err) =>
+      const tokens = brain.pickTokens(brain.tokenPool(cfg.tokens));
+      const buckets: Record<string, SizeBucket> = {};
+      const sizeFor = (sym: string) => {
+        const pick = brain.pickSize(sym, sizeUsd);
+        buckets[sym] = pick.bucket;
+        return usdToUsdcAtoms(pick.usd);
+      };
+      const opps = await scan(jup, tokens, sizeFor, cfg.priorityFeeLamports, solPrice, (sym, err) =>
         console.warn(`quote ${sym} failed: ${String(err).slice(0, 120)}`),
       );
-      for (const o of opps) brain.observeScan(o.symbol, o.eval.netBps);
+      for (const o of opps) brain.observeScan(o.symbol, o.eval.netBps, o.eval.netUsd, buckets[o.symbol]);
 
       const best = opps[0];
       if (best) {
         console.log(
-          `best ${best.symbol} $${sizeUsd}: net ${best.eval.netBps.toFixed(1)}bps ($${best.eval.netUsd.toFixed(4)}) ` +
+          `best ${best.symbol} $${best.eval.inUsd.toFixed(2)}: net ${best.eval.netBps.toFixed(1)}bps ($${best.eval.netUsd.toFixed(4)}) ` +
             `need ${brain.minProfitBps}bps [${best.routes}]`,
         );
       }
@@ -130,7 +154,7 @@ async function main() {
           mode: cfg.mode,
           symbol: best.symbol,
           status: result.status,
-          inUsd: sizeUsd,
+          inUsd: best.eval.inUsd,
           netUsd: result.netUsd,
           feeUsd: result.feeUsd,
           signature: result.signature,
@@ -140,17 +164,18 @@ async function main() {
         risk.recordResult(result.status);
         if (result.status !== "skipped") {
           await notify(
-            `${result.status.toUpperCase()} ${best.symbol} $${sizeUsd}: net $${result.netUsd.toFixed(4)}` +
+            `${result.status.toUpperCase()} ${best.symbol} $${best.eval.inUsd.toFixed(2)}: net $${result.netUsd.toFixed(4)}` +
               (result.signature ? ` https://solscan.io/tx/${result.signature}` : "") +
               (result.reason ? ` (${result.reason})` : ""),
           );
         }
       }
+      nextWaitMs = brain.nextIntervalMs(best?.eval.netBps, cfg.scanIntervalMs);
       brain.save();
     } catch (err) {
       console.error("cycle error:", err);
     }
-    await sleep(cfg.scanIntervalMs);
+    await sleep(nextWaitMs);
   }
 
   brain.save();

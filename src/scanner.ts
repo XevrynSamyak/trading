@@ -48,11 +48,11 @@ export async function quoteRoundTrip(
   };
 }
 
-/** Quotes every token and returns them best-first. Failed quotes are skipped. */
+/** Quotes every token (each at its own size) and returns them best-first. Failed quotes are skipped. */
 export async function scan(
   jup: JupiterClient,
   tokens: Record<string, string>,
-  inAtoms: bigint,
+  sizeFor: (symbol: string) => bigint,
   priorityFeeLamports: number,
   solPriceUsd: number,
   onError: (symbol: string, err: unknown) => void = () => {},
@@ -61,7 +61,7 @@ export async function scan(
   // Sequential on purpose: free Jupiter tier is rate-limited.
   for (const [symbol, mint] of Object.entries(tokens)) {
     try {
-      results.push(await quoteRoundTrip(jup, symbol, mint, inAtoms, priorityFeeLamports, solPriceUsd));
+      results.push(await quoteRoundTrip(jup, symbol, mint, sizeFor(symbol), priorityFeeLamports, solPriceUsd));
     } catch (err) {
       onError(symbol, err);
     }

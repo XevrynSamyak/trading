@@ -5,9 +5,23 @@ import { dirname } from "node:path";
  * The bot's learning "brain". No AI API calls (too slow for arbitrage and it
  * would cost money); it learns from its own scans and trades:
  *  - which tokens tend to show price gaps -> scans those more often
+ *  - which trade size works best per token -> smaller trades move the price less
+ *  - which hours of the day are best -> scans faster then, slower otherwise
+ *  - how close it is to a gap -> speeds up when one is nearly there
  *  - how its trades turn out -> tunes how much profit it demands per trade
+ *  - which newly discovered tokens are worth keeping -> forgets the useless ones
  * State is saved to disk so it keeps what it learned across restarts.
  */
+
+/** Trade size as a share of the maximum the wallet allows. */
+export const SIZE_BUCKETS = [0.25, 0.5, 1] as const;
+export type SizeBucket = (typeof SIZE_BUCKETS)[number];
+
+export interface BucketStats {
+  n: number;
+  /** Exponentially-weighted average net USD a round trip at this size would make. */
+  avgNetUsd: number;
+}
 
 export interface TokenStats {
   scans: number;
@@ -16,12 +30,17 @@ export interface TokenStats {
   fills: number;
   failures: number;
   pnlUsd: number;
+  sizes: Record<string, BucketStats>;
 }
 
 export interface BrainState {
   tokens: Record<string, TokenStats>;
   minProfitBps: number;
   totalScans: number;
+  /** Average best edge (bps) seen in each UTC hour; null = not seen yet. */
+  hourEdgeBps: (number | null)[];
+  /** Tokens it found by itself (symbol -> mint), on top of the configured ones. */
+  discovered: Record<string, string>;
 }
 
 export interface BrainOptions {
@@ -31,12 +50,23 @@ export interface BrainOptions {
   maxBps?: number;
   /** How many tokens to quote per cycle (each costs 2 API calls). */
   tokensPerCycle?: number;
-  /** Chance of scanning a random token instead of the best-ranked ones. */
+  /** Chance of trying something other than the current best (token or size). */
   exploreRate?: number;
+  /** Scan interval bounds for adaptive pacing. */
+  minIntervalMs?: number;
+  maxIntervalMs?: number;
   random?: () => number;
 }
 
 const EDGE_SMOOTHING = 0.2;
+const HOUR_SMOOTHING = 0.05;
+/** Tries each size this many times before trusting the averages. */
+const SIZE_WARMUP = 3;
+/** A discovered token this bad after this many scans is dropped. */
+const PRUNE_AFTER_SCANS = 50;
+const PRUNE_BELOW_BPS = -30;
+
+const ewma = (prev: number, next: number, a: number) => prev * (1 - a) + next * a;
 
 export class Brain {
   state: BrainState;
@@ -51,16 +81,28 @@ export class Brain {
       maxBps: opts.baseMinProfitBps * 4,
       tokensPerCycle: 3,
       exploreRate: 0.2,
+      minIntervalMs: 8_000,
+      maxIntervalMs: 60_000,
       random: Math.random,
       ...opts,
     };
-    this.state = this.load() ?? { tokens: {}, minProfitBps: opts.baseMinProfitBps, totalScans: 0 };
+    const loaded = this.load();
+    this.state = {
+      tokens: {},
+      minProfitBps: opts.baseMinProfitBps,
+      totalScans: 0,
+      ...loaded,
+      // Older brain files lack these; fill them in so they upgrade in place.
+      hourEdgeBps: loaded?.hourEdgeBps ?? Array(24).fill(null),
+      discovered: loaded?.discovered ?? {},
+    };
+    for (const s of Object.values(this.state.tokens)) s.sizes ??= {};
   }
 
-  private load(): BrainState | null {
+  private load(): Partial<BrainState> | null {
     if (!existsSync(this.path)) return null;
     try {
-      return JSON.parse(readFileSync(this.path, "utf8")) as BrainState;
+      return JSON.parse(readFileSync(this.path, "utf8")) as Partial<BrainState>;
     } catch {
       return null;
     }
@@ -72,7 +114,37 @@ export class Brain {
   }
 
   private stats(symbol: string): TokenStats {
-    return (this.state.tokens[symbol] ??= { scans: 0, avgEdgeBps: 0, fills: 0, failures: 0, pnlUsd: 0 });
+    return (this.state.tokens[symbol] ??= { scans: 0, avgEdgeBps: 0, fills: 0, failures: 0, pnlUsd: 0, sizes: {} });
+  }
+
+  // ---- which tokens -------------------------------------------------------
+
+  /** Configured tokens plus the ones it discovered by itself. */
+  tokenPool(configured: Record<string, string>): Record<string, string> {
+    return { ...this.state.discovered, ...configured };
+  }
+
+  /**
+   * Adds newly discovered tokens, after first forgetting discovered tokens that
+   * proved useless. Configured tokens are never dropped.
+   */
+  learnTokens(found: Record<string, string>, configured: Record<string, string>, maxTotal: number): string[] {
+    for (const [sym] of Object.entries(this.state.discovered)) {
+      const s = this.state.tokens[sym];
+      if (s && s.scans >= PRUNE_AFTER_SCANS && s.avgEdgeBps < PRUNE_BELOW_BPS && s.fills === 0) {
+        delete this.state.discovered[sym];
+      }
+    }
+    const knownMints = new Set([...Object.values(configured), ...Object.values(this.state.discovered)]);
+    const added: string[] = [];
+    for (const [sym, mint] of Object.entries(found)) {
+      if (Object.keys(this.tokenPool(configured)).length >= maxTotal) break;
+      if (knownMints.has(mint) || sym in configured || sym in this.state.discovered) continue;
+      this.state.discovered[sym] = mint;
+      knownMints.add(mint);
+      added.push(sym);
+    }
+    return added;
   }
 
   /** UCB-style score: tokens with a good edge rank high; rarely-scanned ones get a curiosity bonus. */
@@ -97,11 +169,42 @@ export class Brain {
     return Object.fromEntries(chosen.map((s) => [s, all[s]]));
   }
 
-  observeScan(symbol: string, netBps: number): void {
+  // ---- what size ----------------------------------------------------------
+
+  /**
+   * Picks how much of `maxUsd` to trade for this token. Smaller trades move
+   * the price less (better %), bigger ones make more per win; it learns which
+   * nets the most dollars per token.
+   */
+  pickSize(symbol: string, maxUsd: number): { usd: number; bucket: SizeBucket } {
+    const sizes = this.stats(symbol).sizes;
+    let bucket: SizeBucket | undefined = SIZE_BUCKETS.find((b) => (sizes[b]?.n ?? 0) < SIZE_WARMUP);
+    if (bucket === undefined) {
+      if (this.opts.random() < this.opts.exploreRate) {
+        bucket = SIZE_BUCKETS[Math.floor(this.opts.random() * SIZE_BUCKETS.length)];
+      } else {
+        bucket = [...SIZE_BUCKETS].sort((a, b) => sizes[b].avgNetUsd - sizes[a].avgNetUsd)[0];
+      }
+    }
+    const usd = Math.floor(maxUsd * bucket * 100) / 100;
+    // Tiny trades are all fees; fall back to the full size.
+    return usd >= 1 ? { usd, bucket } : { usd: maxUsd, bucket: 1 };
+  }
+
+  // ---- learning from scans and trades -------------------------------------
+
+  observeScan(symbol: string, netBps: number, netUsd = 0, bucket: SizeBucket = 1, hour = new Date().getUTCHours()): void {
     const s = this.stats(symbol);
-    s.avgEdgeBps = s.scans === 0 ? netBps : s.avgEdgeBps * (1 - EDGE_SMOOTHING) + netBps * EDGE_SMOOTHING;
+    s.avgEdgeBps = s.scans === 0 ? netBps : ewma(s.avgEdgeBps, netBps, EDGE_SMOOTHING);
     s.scans += 1;
     this.state.totalScans += 1;
+
+    const b = (s.sizes[bucket] ??= { n: 0, avgNetUsd: netUsd });
+    b.avgNetUsd = b.n === 0 ? netUsd : ewma(b.avgNetUsd, netUsd, EDGE_SMOOTHING);
+    b.n += 1;
+
+    const prev = this.state.hourEdgeBps[hour];
+    this.state.hourEdgeBps[hour] = prev === null ? netBps : ewma(prev, netBps, HOUR_SMOOTHING);
   }
 
   /** Learns from a trade outcome and adjusts how picky it is. */
@@ -123,10 +226,60 @@ export class Brain {
     return this.state.minProfitBps;
   }
 
+  // ---- when to look -------------------------------------------------------
+
+  /** Better (true) or worse (false) than the typical hour; null if typical or not enough data. */
+  isGoodHour(hour: number): boolean | null {
+    const known = this.state.hourEdgeBps.filter((v): v is number => v !== null);
+    const here = this.state.hourEdgeBps[hour];
+    if (known.length < 6 || here === null) return null; // not enough data yet
+    const sorted = [...known].sort((a, b) => a - b);
+    const median = sorted[Math.floor(sorted.length / 2)];
+    return here > median ? true : here < median ? false : null;
+  }
+
+  /**
+   * How long to wait before the next scan. Faster when a gap is nearly big
+   * enough or in a historically good hour; slower when nothing is close, which
+   * also saves the free API quota.
+   */
+  nextIntervalMs(bestNetBps: number | undefined, baseMs: number, hour = new Date().getUTCHours()): number {
+    let factor = 1;
+    if (bestNetBps !== undefined) {
+      const shortBy = this.minProfitBps - bestNetBps;
+      if (shortBy <= 5) factor *= 0.5;
+      else if (shortBy > 40) factor *= 1.5;
+    }
+    const good = this.isGoodHour(hour);
+    if (good === true) factor *= 0.8;
+    else if (good === false) factor *= 1.25;
+    return Math.round(Math.min(this.opts.maxIntervalMs, Math.max(this.opts.minIntervalMs, baseMs * factor)));
+  }
+
+  // ---- reporting ----------------------------------------------------------
+
   summary(): string {
-    const rows = Object.entries(this.state.tokens)
-      .sort(([a], [b]) => this.score(b) - this.score(a))
-      .map(([sym, s]) => `${sym}: edge ${s.avgEdgeBps.toFixed(1)}bps, ${s.fills} fills, ${s.failures} fails, $${s.pnlUsd.toFixed(4)}`);
-    return [`profit threshold: ${this.state.minProfitBps}bps`, ...rows].join("\n");
+    const lines = [`profit threshold: ${this.state.minProfitBps}bps`];
+
+    const hours = this.state.hourEdgeBps
+      .map((v, h) => [h, v] as const)
+      .filter((x): x is readonly [number, number] => x[1] !== null)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3);
+    if (hours.length) {
+      lines.push(`best hours (UTC): ${hours.map(([h, v]) => `${h}:00 (${v.toFixed(1)}bps)`).join(", ")}`);
+    }
+
+    const discovered = Object.keys(this.state.discovered);
+    if (discovered.length) lines.push(`found by itself: ${discovered.join(", ")}`);
+
+    for (const [sym, s] of Object.entries(this.state.tokens).sort(([a], [b]) => this.score(b) - this.score(a))) {
+      const best = Object.entries(s.sizes).sort(([, a], [, b]) => b.avgNetUsd - a.avgNetUsd)[0];
+      const size = best ? `, best size ${Math.round(Number(best[0]) * 100)}%` : "";
+      lines.push(
+        `${sym}: edge ${s.avgEdgeBps.toFixed(1)}bps, ${s.fills} fills, ${s.failures} fails, $${s.pnlUsd.toFixed(4)}${size}`,
+      );
+    }
+    return lines.join("\n");
   }
 }

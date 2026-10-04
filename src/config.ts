@@ -37,6 +37,11 @@ export interface Config {
   scanIntervalMs: number;
   monthlyCostsUsd: Record<string, number>;
   sustainStopAfterMonths: number;
+  /** Let the brain find extra actively-traded tokens by itself. */
+  tokenDiscovery: boolean;
+  jupiterTokensApi: string;
+  maxTokens: number;
+  minTokenLiquidityUsd: number;
   telegramBotToken?: string;
   telegramChatId?: string;
   dataDir: string;
@@ -95,6 +100,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     scanIntervalMs: num(env, "SCAN_INTERVAL_MS", 15_000),
     monthlyCostsUsd: costs,
     sustainStopAfterMonths: num(env, "SUSTAIN_STOP_AFTER_MONTHS", 2),
+    tokenDiscovery: env.TOKEN_DISCOVERY !== "off",
+    jupiterTokensApi: (env.JUPITER_TOKENS_API || "https://lite-api.jup.ag/tokens/v2").replace(/\/$/, ""),
+    maxTokens: num(env, "MAX_TOKENS", 12),
+    minTokenLiquidityUsd: num(env, "MIN_TOKEN_LIQUIDITY_USD", 1_000_000),
     telegramBotToken: env.TELEGRAM_BOT_TOKEN || undefined,
     telegramChatId: env.TELEGRAM_CHAT_ID || undefined,
     dataDir: env.DATA_DIR || "./data",

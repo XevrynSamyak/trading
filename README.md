@@ -31,8 +31,15 @@ paper mode, and it stops on its own before losing more than you allow.
 
 ## What it does each cycle
 
-1. **Brain** (`src/brain.ts`) picks which tokens to check, favouring those
-   where it has seen gaps before and occasionally exploring others.
+1. **Brain** (`src/brain.ts`) decides where and how to look:
+   - **which tokens**: favours tokens where it has seen gaps, sometimes
+     explores others, and every 6 hours **finds new busy, verified tokens by
+     itself** (Jupiter token list), dropping finds that prove useless
+   - **what size**: tries 25% / 50% / 100% trades per token and learns
+     which nets the most dollars (small trades move the price less)
+   - **when**: learns which hours of the day show the best gaps and scans
+     faster then; also speeds up when a gap is almost big enough and slows
+     down when nothing is close (saves the free API quota)
 2. **Scanner** quotes USDC → token → USDC for each one and subtracts
    network fees.
 3. If the net profit beats the brain's current threshold, **executor** puts

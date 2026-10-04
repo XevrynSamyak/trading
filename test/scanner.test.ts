@@ -22,7 +22,7 @@ function fakeFetch(): typeof fetch {
 describe("scan", () => {
   it("ranks round trips by net profit after fees", async () => {
     const jup = new JupiterClient("https://fake", fakeFetch());
-    const opps = await scan(jup, { Y: "Y", X: "X" }, 10_000_000n, 10_000, 200);
+    const opps = await scan(jup, { Y: "Y", X: "X" }, () => 10_000_000n, 10_000, 200);
     expect(opps.map((o) => o.symbol)).toEqual(["X", "Y"]);
     expect(opps[0].eval.netUsd).toBeCloseTo(0.1 - 0.003, 6);
     expect(opps[1].eval.netUsd).toBeLessThan(0);
