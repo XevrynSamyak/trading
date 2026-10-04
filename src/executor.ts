@@ -204,7 +204,9 @@ export async function liveExecute(
   built.tx.sign([wallet]);
 
   const sim = await conn.simulateTransaction(built.tx, { commitment: "processed" });
-  if (sim.value.err) return { status: "rejected", netUsd: 0, feeUsd: 0, reason: `would revert: ${shortErr(sim.value.err)}` };
+  if (sim.value.err) {
+    return { status: "rejected", netUsd: 0, feeUsd: 0, reason: `would revert: ${shortErr(sim.value.err)}`, verified: true };
+  }
 
   const before = await getBalances(conn, wallet.publicKey);
   let signature: string;
@@ -219,7 +221,7 @@ export async function liveExecute(
 
   const landing = await waitForLanding(conn, signature, built.lastValidBlockHeight);
   if (!landing.landed) {
-    return { status: "rejected", netUsd: 0, feeUsd: 0, signature, reason: "did not land (no fee paid)" };
+    return { status: "rejected", netUsd: 0, feeUsd: 0, signature, reason: "did not land (no fee paid)", verified: true };
   }
 
   const after = await getBalances(conn, wallet.publicKey);

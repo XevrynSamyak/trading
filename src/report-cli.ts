@@ -19,7 +19,9 @@ console.log(
 console.log(`Total net P&L: $${total.toFixed(4)}  (wallet ~ $${(cfg.startingBalanceUsd + total).toFixed(2)})`);
 console.log(formatVerdict(monthVerdict(records, startOfUtcMonth(Date.now()), cfg.monthlyCostsUsd)) + " (month to date)");
 
-console.log("\nBrain:\n" + brain.summary());
+console.log("\nWhat the brain is thinking:");
+for (const t of brain.thoughts(cfg.minProfitBps)) console.log(`- ${t}`);
+console.log("\nBrain details:\n" + brain.summary());
 
 if (cfg.mode === "paper") {
   const r = assessReadiness(records, brain.state.startedAt, Date.now(), cfg.monthlyCostsUsd);

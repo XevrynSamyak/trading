@@ -40,6 +40,12 @@ paper mode, and it stops on its own before losing more than you allow.
    - **when**: learns which hours of the day show the best gaps and scans
      faster then; also speeds up when a gap is almost big enough and slows
      down when nothing is close (saves the free API quota)
+   - **sudden moves**: when a token's price jumps between scans (when gaps
+     tend to open) it checks that token first and scans faster for a while
+   - **how much to trust quotes**: from on-chain tests it learns how much
+     each token's quotes overstate reality, and discounts them by that
+   - **explains itself**: `npm run report` and the daily message say, in
+     plain language, what it noticed and why it acts that way
 2. **Scanner** quotes USDC → token → USDC for each one and subtracts
    network fees.
 3. If the net profit beats the brain's current threshold, **executor** puts

@@ -113,3 +113,75 @@ describe("Brain: fake gaps and the gap histogram", () => {
     expect(b.summary()).toContain("-5..0: 50.0%");
   });
 });
+
+describe("Brain: reality checks, sudden moves, and thoughts", () => {
+  const T0 = Date.parse("2026-10-04T14:00:00Z");
+
+  it("learns how much a token's quotes overstate reality and discounts them", () => {
+    const b = new Brain(tmp(), { baseMinProfitBps: 20, exploreRate: 0 });
+    for (let i = 0; i < 5; i++) b.observeReality("A", 25, 0); // quoted 25bps, really nothing (fake)
+    expect(b.expectedNetBps("A", 25)).toBeLessThan(5);
+    expect(b.shouldAttempt("A", 25)).toBe(false);
+    expect(b.shouldAttempt("B", 25)).toBe(true); // no evidence against B
+  });
+
+  it("never inflates a quote, even if reality beat it", () => {
+    const b = new Brain(tmp(), { baseMinProfitBps: 20 });
+    b.observeReality("A", 20, 30);
+    expect(b.expectedNetBps("A", 20)).toBe(20);
+  });
+
+  it("still re-checks a discounted token now and then", () => {
+    const b = new Brain(tmp(), { baseMinProfitBps: 20, exploreRate: 0.2, random: () => 0.1 });
+    for (let i = 0; i < 5; i++) b.observeReality("A", 25, 0);
+    expect(b.shouldAttempt("A", 25)).toBe(true);
+    expect(b.shouldAttempt("A", 10)).toBe(false); // below the bar even before discounting
+  });
+
+  it("marks a token hot after a sudden move, scans it first and faster", () => {
+    const b = new Brain(tmp(), { baseMinProfitBps: 20, tokensPerCycle: 1, exploreRate: 0 });
+    for (let i = 0; i < 10; i++) { b.observeScan("A", 5); b.observeScan("Z", -40); }
+    expect(b.observePrice("Z", 1, 100, T0)).toBeNull(); // first sighting
+    expect(b.observePrice("Z", 0.5, 101, T0 + 10_000)).toBeNull(); // different size: not comparable
+    expect(b.observePrice("Z", 1, 100.5, T0 + 20_000)).toBeCloseTo(50, 6); // +0.5% in 20s
+    expect(b.isHot("Z", T0 + 30_000)).toBe(true);
+    expect(Object.keys(b.pickTokens({ A: "a", Z: "z" }, T0 + 30_000))).toEqual(["Z"]);
+    expect(b.nextIntervalMs(5, 15_000, 0, T0 + 30_000)).toBe(9_000);
+    expect(b.isHot("Z", T0 + 3 * 60_000)).toBe(false); // cools down after 2 minutes
+    expect(b.state.hotEvents).toBe(1);
+  });
+
+  it("ignores small moves and stale comparisons", () => {
+    const b = new Brain(tmp(), { baseMinProfitBps: 20 });
+    b.observePrice("A", 1, 100, T0);
+    b.observePrice("A", 1, 100.1, T0 + 10_000); // 10bps: normal noise
+    b.observePrice("A", 1, 110, T0 + 20 * 60_000); // big, but 20 minutes later
+    expect(b.isHot("A", T0 + 20 * 60_000)).toBe(false);
+  });
+
+  it("explains itself in plain language", () => {
+    const b = new Brain(tmp(), { baseMinProfitBps: 20 });
+    b.observeCycle(-3, "SOL", T0);
+    b.observeCycle(4.1, "WIF", T0 + 60_000);
+    for (let i = 0; i < 4; i++) b.observeReality("SOL", 22, 10);
+    b.observePrice("JUP", 1, 100, T0);
+    b.observePrice("JUP", 1, 101, T0 + 30_000);
+    const text = b.thoughts(20).join("\n");
+    expect(text).toContain("at least 20bps (0.20%)");
+    expect(text).toContain("closest I've come is WIF at 4.1bps");
+    expect(text).toContain("SOL's quotes look ~12.0bps better");
+    expect(text).toContain("JUP moving 1.00% within minutes");
+  });
+
+  it("upgrades a brain file from the previous version", () => {
+    const path = tmp();
+    writeFileSync(path, JSON.stringify({
+      tokens: { A: { scans: 5, avgEdgeBps: -3, fills: 0, failures: 0, pnlUsd: 0, phantoms: 2, sizes: {} } },
+      minProfitBps: 20, totalScans: 5, hourEdgeBps: Array(24).fill(null), discovered: {}, edgeHistogram: {}, startedAt: 1,
+    }));
+    const b = new Brain(path, { baseMinProfitBps: 20 });
+    expect(b.expectedNetBps("A", 10)).toBe(10);
+    expect(b.state.hotEvents).toBe(0);
+    expect(b.thoughts(20).length).toBeGreaterThan(0);
+  });
+});

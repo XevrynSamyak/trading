@@ -120,7 +120,10 @@ async function main() {
       // Daily and monthly bookkeeping.
       if (startOfUtcDay(now) !== lastDay) {
         const pnl = ledger.pnlBetween(lastDay, startOfUtcDay(now), records);
-        await notify(`Daily: ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(4)}\n${brain.summary()}`);
+        await notify(
+          `Daily: ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(4)}\n` +
+            brain.thoughts(cfg.minProfitBps).map((t) => `- ${t}`).join("\n"),
+        );
         lastDay = startOfUtcDay(now);
       }
       if (startOfUtcMonth(now) !== lastMonth) {
@@ -180,18 +183,29 @@ async function main() {
         if (String(err).includes(" 429")) rateLimited = true;
         console.warn(`quote ${sym} failed: ${String(err).slice(0, 120)}`);
       });
-      for (const o of opps) brain.observeScan(o.symbol, o.eval.netBps, o.eval.netUsd, buckets[o.symbol]);
+      for (const o of opps) {
+        brain.observeScan(o.symbol, o.eval.netBps, o.eval.netUsd, buckets[o.symbol]);
+        const wasHot = brain.isHot(o.symbol);
+        const move = brain.observePrice(o.symbol, buckets[o.symbol], Number(o.leg1.outAmount) / Number(o.leg1.inAmount));
+        if (move !== null && !wasHot && brain.isHot(o.symbol)) {
+          console.log(`${o.symbol} is moving fast (${move.toFixed(0)}bps); watching it closely`);
+        }
+      }
+      if (opps[0]) brain.observeCycle(opps[0].eval.netBps, opps[0].symbol);
 
-      const best = opps[0];
+      // Rank by what the brain expects really to happen, not the raw quote.
+      const expected = (o: (typeof opps)[number]) => brain.expectedNetBps(o.symbol, o.eval.netBps);
+      const best = [...opps].sort((a, b) => expected(b) - expected(a))[0];
       if (best) {
-        brain.observeCycle(best.eval.netBps);
+        const exp = expected(best);
         console.log(
           `best ${best.symbol} $${best.eval.inUsd.toFixed(2)}: net ${best.eval.netBps.toFixed(1)}bps ` +
+            (Math.abs(exp - best.eval.netBps) >= 0.1 ? `(expect ${exp.toFixed(1)}) ` : "") +
             `($${best.eval.netUsd.toFixed(4)}) need ${brain.minProfitBps}bps [${best.routes}]`,
         );
       }
 
-      if (best && best.eval.netBps >= brain.minProfitBps) {
+      if (best && brain.shouldAttempt(best.symbol, best.eval.netBps)) {
         const deps = { conn, jup, cfg, solPriceUsd: solPrice, tipAccount: pickTip() };
         let result: ExecResult;
         if (cfg.mode === "live" && wallet) result = await liveExecute(best, wallet, { ...deps, jito });
@@ -211,6 +225,10 @@ async function main() {
           verified: result.verified,
         });
         brain.observeTrade(best.symbol, result.status, result.netUsd);
+        if (result.verified && (result.status === "filled" || result.status === "rejected")) {
+          const realBps = result.status === "filled" ? (result.netUsd / best.eval.inUsd) * 10_000 : 0;
+          brain.observeReality(best.symbol, best.eval.netBps, realBps);
+        }
         risk.recordResult(result.status);
 
         const line =

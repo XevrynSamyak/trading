@@ -11,6 +11,9 @@ import { dirname } from "node:path";
  *  - how its trades turn out -> tunes how much profit it demands per trade
  *  - which newly discovered tokens are worth keeping -> forgets the useless ones
  *  - which tokens show fake gaps (quotes that don't hold on-chain) -> trusts them less
+ *  - how much each token's quotes overstate reality -> discounts its quotes by that
+ *  - sudden price moves (when gaps tend to appear) -> watches that token closely
+ * It also explains what it noticed in plain language (thoughts()).
  * State is saved to disk so it keeps what it learned across restarts.
  */
 
@@ -33,7 +36,16 @@ export interface TokenStats {
   pnlUsd: number;
   /** Quoted gaps that were not real when checked on-chain. */
   phantoms: number;
+  /** How many bps the quotes overstated the real (on-chain checked) result, on average. */
+  haircutBps: number;
+  realityChecks: number;
   sizes: Record<string, BucketStats>;
+}
+
+export interface Moment {
+  symbol: string;
+  bps: number;
+  at: number;
 }
 
 export interface BrainState {
@@ -48,6 +60,11 @@ export interface BrainState {
   edgeHistogram: Record<string, number>;
   /** When this brain started learning (ms). */
   startedAt: number;
+  /** The closest it has come to a profitable gap. */
+  bestGap: Moment | null;
+  /** Sudden price moves it reacted to. */
+  hotEvents: number;
+  lastHot: Moment | null;
 }
 
 export interface BrainOptions {
@@ -72,6 +89,13 @@ const SIZE_WARMUP = 3;
 /** A discovered token this bad after this many scans is dropped. */
 const PRUNE_AFTER_SCANS = 50;
 const PRUNE_BELOW_BPS = -30;
+const HAIRCUT_SMOOTHING = 0.3;
+/** A move this big (bps) between two scans of a token marks it "hot". */
+const HOT_MOVE_BPS = 30;
+/** ...if the two scans were at most this far apart. */
+const HOT_WINDOW_MS = 5 * 60_000;
+/** How long a hot token gets extra attention. */
+const HOT_FOR_MS = 2 * 60_000;
 
 const ewma = (prev: number, next: number, a: number) => prev * (1 - a) + next * a;
 
@@ -90,6 +114,9 @@ export const edgeBin = (bps: number): string => EDGE_BINS.find(([, upTo]) => bps
 export class Brain {
   state: BrainState;
   private readonly opts: Required<BrainOptions>;
+  /** Short-term memory (not saved): last price seen per token+size, and hot tokens. */
+  private lastRate = new Map<string, { rate: number; at: number }>();
+  private hotUntil = new Map<string, number>();
 
   constructor(
     private readonly path: string,
@@ -116,10 +143,15 @@ export class Brain {
       discovered: loaded?.discovered ?? {},
       edgeHistogram: loaded?.edgeHistogram ?? {},
       startedAt: loaded?.startedAt ?? Date.now(),
+      bestGap: loaded?.bestGap ?? null,
+      hotEvents: loaded?.hotEvents ?? 0,
+      lastHot: loaded?.lastHot ?? null,
     };
     for (const s of Object.values(this.state.tokens)) {
       s.sizes ??= {};
       s.phantoms ??= 0;
+      s.haircutBps ??= 0;
+      s.realityChecks ??= 0;
     }
   }
 
@@ -145,6 +177,8 @@ export class Brain {
       failures: 0,
       pnlUsd: 0,
       phantoms: 0,
+      haircutBps: 0,
+      realityChecks: 0,
       sizes: {},
     });
   }
@@ -190,17 +224,73 @@ export class Brain {
     return s.avgEdgeBps + curiosity + 10 * reliability;
   }
 
-  /** Picks which tokens to scan this cycle. */
-  pickTokens(all: Record<string, string>): Record<string, string> {
+  /** Picks which tokens to scan this cycle. Hot tokens (sudden moves) go first. */
+  pickTokens(all: Record<string, string>, now = Date.now()): Record<string, string> {
     const symbols = Object.keys(all);
     const n = Math.min(this.opts.tokensPerCycle, symbols.length);
     const ranked = [...symbols].sort((a, b) => this.score(b) - this.score(a));
-    const chosen = ranked.slice(0, n);
-    if (this.opts.random() < this.opts.exploreRate && symbols.length > n) {
-      const rest = ranked.slice(n);
+    const hot = ranked.filter((s) => this.isHot(s, now));
+    const chosen = [...hot, ...ranked.filter((s) => !hot.includes(s))].slice(0, n);
+    if (hot.length < n && this.opts.random() < this.opts.exploreRate && symbols.length > n) {
+      const rest = ranked.filter((s) => !chosen.includes(s));
       chosen[n - 1] = rest[Math.floor(this.opts.random() * rest.length)];
     }
     return Object.fromEntries(chosen.map((s) => [s, all[s]]));
+  }
+
+  // ---- sudden moves -------------------------------------------------------
+
+  /**
+   * Watches each token's price between scans (same trade size, so price
+   * impact doesn't fake a move). A sharp move marks it hot for a while:
+   * that is when gaps between exchanges tend to open.
+   */
+  observePrice(symbol: string, bucket: SizeBucket, rate: number, now = Date.now()): number | null {
+    const key = `${symbol}:${bucket}`;
+    const prev = this.lastRate.get(key);
+    this.lastRate.set(key, { rate, at: now });
+    if (!prev || prev.rate <= 0 || now - prev.at > HOT_WINDOW_MS) return null;
+    const moveBps = Math.abs(rate / prev.rate - 1) * 10_000;
+    if (moveBps >= HOT_MOVE_BPS) {
+      if (!this.isHot(symbol, now)) {
+        this.state.hotEvents += 1;
+        this.state.lastHot = { symbol, bps: Math.round(moveBps * 10) / 10, at: now };
+      }
+      this.hotUntil.set(symbol, now + HOT_FOR_MS);
+    }
+    return moveBps;
+  }
+
+  isHot(symbol: string, now = Date.now()): boolean {
+    return (this.hotUntil.get(symbol) ?? 0) > now;
+  }
+
+  // ---- how much to trust quotes -------------------------------------------
+
+  /**
+   * Learns from an on-chain check how much the quote overstated reality.
+   * realNetBps is what actually would have been made (0 for a fake gap).
+   */
+  observeReality(symbol: string, quotedNetBps: number, realNetBps: number): void {
+    const s = this.stats(symbol);
+    const miss = quotedNetBps - realNetBps;
+    s.haircutBps = s.realityChecks === 0 ? miss : ewma(s.haircutBps, miss, HAIRCUT_SMOOTHING);
+    s.realityChecks += 1;
+  }
+
+  /** The quote, discounted by how much this token's quotes usually overstate reality. */
+  expectedNetBps(symbol: string, quotedNetBps: number): number {
+    return quotedNetBps - Math.max(0, this.state.tokens[symbol]?.haircutBps ?? 0);
+  }
+
+  /**
+   * Whether to act on a quoted gap. Uses the discounted value; but if only
+   * the discount stands in the way, it still re-checks now and then, since
+   * conditions change.
+   */
+  shouldAttempt(symbol: string, quotedNetBps: number): boolean {
+    if (this.expectedNetBps(symbol, quotedNetBps) >= this.minProfitBps) return true;
+    return quotedNetBps >= this.minProfitBps && this.opts.random() < this.opts.exploreRate;
   }
 
   // ---- what size ----------------------------------------------------------
@@ -242,9 +332,12 @@ export class Brain {
   }
 
   /** Records the best edge of a scan cycle for the histogram. */
-  observeCycle(bestNetBps: number): void {
+  observeCycle(bestNetBps: number, symbol = "?", now = Date.now()): void {
     const bin = edgeBin(bestNetBps);
     this.state.edgeHistogram[bin] = (this.state.edgeHistogram[bin] ?? 0) + 1;
+    if (!this.state.bestGap || bestNetBps > this.state.bestGap.bps) {
+      this.state.bestGap = { symbol, bps: Math.round(bestNetBps * 10) / 10, at: now };
+    }
   }
 
   /** Learns from a trade outcome and adjusts how picky it is. */
@@ -286,8 +379,14 @@ export class Brain {
    * enough or in a historically good hour; slower when nothing is close, which
    * also saves the free API quota.
    */
-  nextIntervalMs(bestNetBps: number | undefined, baseMs: number, hour = new Date().getUTCHours()): number {
+  nextIntervalMs(
+    bestNetBps: number | undefined,
+    baseMs: number,
+    hour = new Date().getUTCHours(),
+    now = Date.now(),
+  ): number {
     let factor = 1;
+    if ([...this.hotUntil.values()].some((until) => until > now)) factor *= 0.6;
     if (bestNetBps !== undefined) {
       const shortBy = this.minProfitBps - bestNetBps;
       if (shortBy <= 5) factor *= 0.5;
@@ -300,6 +399,69 @@ export class Brain {
   }
 
   // ---- reporting ----------------------------------------------------------
+
+  /** What the brain has noticed and why it acts the way it does, in plain language. */
+  thoughts(baseMinProfitBps: number): string[] {
+    const t: string[] = [];
+    const fmtTime = (ms: number) => new Date(ms).toISOString().slice(5, 16).replace("T", " ") + " UTC";
+    const bps = this.state.minProfitBps;
+
+    t.push(
+      `I only trade when a gap pays at least ${bps}bps (${(bps / 100).toFixed(2)}%) after fees` +
+        (bps > baseMinProfitBps ? ", stricter than at the start because some trades went badly." : "") +
+        (bps < baseMinProfitBps ? ", looser than at the start because trades have been working." : "."),
+    );
+
+    const best = this.state.bestGap;
+    if (best) {
+      t.push(
+        best.bps >= bps
+          ? `The best gap I've seen was ${best.symbol} at +${best.bps}bps (${fmtTime(best.at)}).`
+          : `The closest I've come is ${best.symbol} at ${best.bps}bps (${fmtTime(best.at)}); I need ${bps}. ` +
+              `The market hasn't offered a profitable gap yet.`,
+      );
+    }
+
+    const liars = Object.entries(this.state.tokens)
+      .filter(([, s]) => s.realityChecks >= 3 && s.haircutBps > 1)
+      .sort(([, a], [, b]) => b.haircutBps - a.haircutBps)
+      .slice(0, 2);
+    for (const [sym, s] of liars) {
+      t.push(
+        `${sym}'s quotes look ~${s.haircutBps.toFixed(1)}bps better than what really happens on-chain, ` +
+          `so I discount them by that.`,
+      );
+    }
+
+    const fakest = Object.entries(this.state.tokens)
+      .filter(([, s]) => s.phantoms >= 3)
+      .sort(([, a], [, b]) => b.phantoms - a.phantoms)[0];
+    if (fakest) t.push(`${fakest[0]} showed ${fakest[1].phantoms} fake gaps, so I check it less often.`);
+
+    if (this.state.lastHot) {
+      const h = this.state.lastHot;
+      t.push(
+        `I've reacted to ${this.state.hotEvents} sudden price move(s); the latest was ${h.symbol} ` +
+          `moving ${(h.bps / 100).toFixed(2)}% within minutes (${fmtTime(h.at)}), so I watched it closely.`,
+      );
+    }
+
+    const hours = this.state.hourEdgeBps
+      .map((v, h) => [h, v] as const)
+      .filter((x): x is readonly [number, number] => x[1] !== null);
+    if (hours.length >= 6) {
+      const [h] = [...hours].sort((a, b) => b[1] - a[1])[0];
+      t.push(`Gaps have been best around ${h}:00 UTC, so I scan faster then.`);
+    }
+
+    const found = Object.keys(this.state.discovered);
+    if (found.length) t.push(`I found ${found.length} extra token(s) to watch by myself: ${found.join(", ")}.`);
+
+    const favourite = Object.keys(this.state.tokens).sort((a, b) => this.score(b) - this.score(a))[0];
+    if (favourite && this.state.totalScans > 20) t.push(`Right now ${favourite} looks most promising to me.`);
+
+    return t;
+  }
 
   summary(): string {
     const lines = [`profit threshold: ${this.state.minProfitBps}bps`];
@@ -329,7 +491,8 @@ export class Brain {
       const size = best ? `, best size ${Math.round(Number(best[0]) * 100)}%` : "";
       lines.push(
         `${sym}: edge ${s.avgEdgeBps.toFixed(1)}bps, ${s.fills} fills, ${s.failures} fails, ` +
-          `${s.phantoms} fake gaps, $${s.pnlUsd.toFixed(4)}${size}`,
+          `${s.phantoms} fake gaps, $${s.pnlUsd.toFixed(4)}${size}` +
+          (s.realityChecks ? `, quotes discounted ${Math.max(0, s.haircutBps).toFixed(1)}bps` : ""),
       );
     }
     return lines.join("\n");
