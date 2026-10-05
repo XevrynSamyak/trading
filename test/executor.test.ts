@@ -1,9 +1,10 @@
-import { Keypair, PublicKey, SystemProgram, VersionedTransaction } from "@solana/web3.js";
+import { Keypair, PublicKey, SendTransactionError, SystemProgram, VersionedTransaction } from "@solana/web3.js";
+import bs58 from "bs58";
 import { describe, expect, it } from "vitest";
 import { USDC_MINT, loadConfig } from "../src/config.js";
 import { valueCycle, type CostSettings, type Valuation } from "../src/costs.js";
 import { triangleSpec, twoLegSpec, type Cycle, type CycleSpec } from "../src/cycle.js";
-import { failedLegOf, liveExecute, quoteOnlyExecute, simulateExecute, type ExecDeps } from "../src/executor.js";
+import { failedLegOf, liveExecute, quoteOnlyExecute, sendMayHaveReached, simulateExecute, type ExecDeps } from "../src/executor.js";
 import type { JitoClient } from "../src/jito.js";
 import type { JupiterClient, QuoteResponse } from "../src/jupiter.js";
 import { usdcAta } from "../src/wallet.js";
@@ -83,10 +84,16 @@ interface FakeChain {
   /** Status lookups never answer and the blockhash never expires (for the timeout test). */
   hangs?: boolean;
   landErr?: unknown;
+  /** The first N status lookups fail (RPC hiccup). */
+  statusErrors?: number;
+  /** Reading balances fails once the trade landed. */
+  afterReadFails?: boolean;
 }
 
+let statusCalls = 0;
 function fakeConn(chain: FakeChain) {
   let landed = false;
+  statusCalls = 0;
   return {
     async getAddressLookupTable() { return { value: null }; },
     async getLatestBlockhash() { return { blockhash: Keypair.generate().publicKey.toBase58(), lastValidBlockHeight: 100 }; },
@@ -96,6 +103,7 @@ function fakeConn(chain: FakeChain) {
     },
     async getBalance() { return landed ? chain.lamportsAfter : chain.lamportsBefore; },
     async getParsedTokenAccountsByOwner() {
+      if (landed && chain.afterReadFails) throw new Error("fetch failed");
       const amount = (landed ? chain.usdcAfter : chain.usdcBefore).toString();
       const usdc = { lamports: 2_039_280, data: { parsed: { info: { mint: USDC_MINT, tokenAmount: { amount } } } } };
       // After landing, a new token account holds a refundable deposit.
@@ -104,6 +112,8 @@ function fakeConn(chain: FakeChain) {
     },
     async getTransaction() { return { meta: { fee: 6_000 } }; },
     async getSignatureStatuses() {
+      statusCalls += 1;
+      if (chain.statusErrors && statusCalls <= chain.statusErrors) throw new Error("fetch failed");
       if (chain.hangs || !chain.lands) return { value: [null] };
       landed = true;
       return { value: [{ confirmationStatus: "confirmed", err: chain.landErr ?? null }] };
@@ -272,6 +282,59 @@ describe("real trading via Jito (micro/live)", () => {
     });
     expect(r.status).toBe("timeout");
     expect(r.reason).toMatch(/could not confirm/);
+  });
+
+  it("keeps watching a transaction whose send got no answer, and records it if it lands", async () => {
+    const sent: VersionedTransaction[] = [];
+    const jito = {
+      async getTipAccounts() { return [tip.toBase58()]; },
+      async sendTransaction(b64: string) {
+        sent.push(VersionedTransaction.deserialize(Buffer.from(b64, "base64")));
+        throw new TypeError("fetch failed"); // timed out after Jito got it
+      },
+    } as unknown as JitoClient;
+    const conn = fakeConn({ usdcBefore: 20_000_000n, usdcAfter: 20_100_000n, lamportsBefore: 50_000_000, lamportsAfter: 49_984_000, lands: true });
+    const { cycle, val } = candidate();
+    const r = await liveExecute(cycle, val, wallet, { ...deps(conn, fakeJup().jup), jito });
+    expect(r.status).toBe("filled");
+    expect(r.signature).toBe(bs58.encode(sent[0].signatures[0])); // known before sending
+  });
+
+  it("gives up at once when the service clearly refused the send", async () => {
+    const jito = {
+      async getTipAccounts() { return [tip.toBase58()]; },
+      async sendTransaction() { throw new Error("Jito sendTransaction 429: rate limited"); },
+    } as unknown as JitoClient;
+    const conn = fakeConn({ usdcBefore: 1n, usdcAfter: 1n, lamportsBefore: 0, lamportsAfter: 0, lands: true });
+    const { cycle, val } = candidate();
+    const r = await liveExecute(cycle, val, wallet, { ...deps(conn, fakeJup().jup), jito });
+    expect(r).toMatchObject({ status: "rejected", reason: "send refused: Jito sendTransaction 429: rate limited" });
+    expect(statusCalls).toBe(0); // never waited for a landing that can't happen
+  });
+
+  it("rides out an RPC hiccup while waiting for the landing", async () => {
+    const { jito } = fakeJito();
+    const conn = fakeConn({ usdcBefore: 20_000_000n, usdcAfter: 20_100_000n, lamportsBefore: 50_000_000, lamportsAfter: 49_984_000, lands: true, statusErrors: 1 });
+    const { cycle, val } = candidate();
+    const r = await liveExecute(cycle, val, wallet, { ...deps(conn, fakeJup().jup), jito });
+    expect(r.status).toBe("filled");
+  });
+
+  it("treats a landed trade whose result can't be read as unknown (trading then stops)", async () => {
+    const { jito } = fakeJito();
+    const conn = fakeConn({ usdcBefore: 20_000_000n, usdcAfter: 20_100_000n, lamportsBefore: 50_000_000, lamportsAfter: 49_984_000, lands: true, afterReadFails: true });
+    const { cycle, val } = candidate();
+    const r = await liveExecute(cycle, val, wallet, { ...deps(conn, fakeJup().jup), jito });
+    expect(r.status).toBe("timeout");
+    expect(r.reason).toMatch(/landed, but its result could not be read/);
+  }, 10_000);
+
+  it("tells a refused send from one that may have arrived", () => {
+    expect(sendMayHaveReached(new Error("Jito sendTransaction 429: rate limited"))).toBe(false);
+    expect(sendMayHaveReached(new Error("Jito sendTransaction: bundle invalid"))).toBe(false);
+    expect(sendMayHaveReached(new SendTransactionError({ action: "send", signature: "", transactionMessage: "bad" }))).toBe(false);
+    expect(sendMayHaveReached(new TypeError("fetch failed"))).toBe(true);
+    expect(sendMayHaveReached(new DOMException("The operation was aborted due to timeout", "TimeoutError"))).toBe(true);
   });
 
   it("refuses to trade via Jito without a tip account", async () => {

@@ -4,11 +4,13 @@ import {
   Connection,
   Keypair,
   PublicKey,
+  SendTransactionError,
   SystemProgram,
   TransactionInstruction,
   TransactionMessage,
   VersionedTransaction,
 } from "@solana/web3.js";
+import bs58 from "bs58";
 import type { Config } from "./config.js";
 import type { Costs, CostSettings, Valuation } from "./costs.js";
 import { quoteCycle, specOf, type Cycle } from "./cycle.js";
@@ -301,14 +303,41 @@ async function waitForLanding(
 ): Promise<{ landed: boolean; err?: unknown; timedOut?: boolean }> {
   const start = now();
   for (;;) {
-    const { value } = await conn.getSignatureStatuses([signature]);
-    const st = value[0];
-    if (st && (st.confirmationStatus === "confirmed" || st.confirmationStatus === "finalized")) {
-      return { landed: true, err: st.err ?? undefined };
+    try {
+      const { value } = await conn.getSignatureStatuses([signature]);
+      const st = value[0];
+      if (st && (st.confirmationStatus === "confirmed" || st.confirmationStatus === "finalized")) {
+        return { landed: true, err: st.err ?? undefined };
+      }
+      if ((await conn.getBlockHeight("confirmed")) > lastValidBlockHeight) return { landed: false };
+    } catch {
+      // An RPC hiccup must not lose track of a sent transaction: keep asking until the timeout.
     }
-    if ((await conn.getBlockHeight("confirmed")) > lastValidBlockHeight) return { landed: false };
     if (now() - start > timeoutMs) return { landed: false, timedOut: true };
     await new Promise((r) => setTimeout(r, 1_000));
+  }
+}
+
+/**
+ * After a send error, could the transaction still have reached the network?
+ * A service that answered with an error refused it; no answer at all (timeout,
+ * connection reset) means it may have arrived and can still land.
+ */
+export function sendMayHaveReached(err: unknown): boolean {
+  if (err instanceof SendTransactionError) return false;
+  const msg = err instanceof Error ? err.message : String(err);
+  return !/^Jito \w+( \d{3})?:/.test(msg);
+}
+
+/** Retries a read a few times (RPC hiccups), so a landed trade's result isn't lost. */
+async function readWithRetry<T>(fn: () => Promise<T>, attempts = 3, delayMs = 1_000): Promise<T> {
+  for (let i = 1; ; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (i >= attempts) throw err;
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
   }
 }
 
@@ -349,16 +378,22 @@ export async function liveExecute(
   }
 
   const before = await getBalances(conn, wallet.publicKey);
-  let signature: string;
+  // The signature is known before sending, so landing can be checked even if the send call fails.
+  let signature = bs58.encode(built.tx.signatures[0]);
+  let sendError: string | undefined;
   try {
     signature =
       cfg.sendVia === "jito"
         ? await deps.jito!.sendTransaction(Buffer.from(built.tx.serialize()).toString("base64"))
         : await conn.sendTransaction(built.tx, { skipPreflight: true, maxRetries: 2 });
-    t.submitted = now();
   } catch (err) {
-    return result("rejected", t, { executable: prep.val, reason: `send refused: ${String(err).slice(0, 160)}` });
+    sendError = String(err instanceof Error ? err.message : err).slice(0, 160);
+    if (!sendMayHaveReached(err)) {
+      return result("rejected", t, { executable: prep.val, reason: `send refused: ${sendError}` });
+    }
+    // No answer: it may still land. Watch for it like any sent transaction.
   }
+  t.submitted = now();
 
   const landing = await waitForLanding(conn, signature, built.lastValidBlockHeight, cfg.landingTimeoutMs, now);
   if (landing.timedOut) {
@@ -369,14 +404,26 @@ export async function liveExecute(
     });
   }
   if (!landing.landed) {
-    return result("rejected", t, { signature, executable: prep.val, verified: true, reason: "did not land (no fee paid)" });
+    const why = sendError ? `send got no answer (${sendError}) and it never landed (no fee paid)` : "did not land (no fee paid)";
+    return result("rejected", t, { signature, executable: prep.val, verified: true, reason: why });
   }
   t.landed = now();
 
-  const after = await getBalances(conn, wallet.publicKey);
-  // Fee from the transaction itself (+ tip). A balance diff would wrongly count
-  // the refundable deposit for a newly opened token account as a loss.
-  const info = await conn.getTransaction(signature, { commitment: "confirmed", maxSupportedTransactionVersion: 0 });
+  let after: Awaited<ReturnType<typeof getBalances>>;
+  let info: Awaited<ReturnType<Connection["getTransaction"]>>;
+  try {
+    after = await readWithRetry(() => getBalances(conn, wallet.publicKey));
+    // Fee from the transaction itself (+ tip). A balance diff would wrongly count
+    // the refundable deposit for a newly opened token account as a loss.
+    info = await readWithRetry(() => conn.getTransaction(signature, { commitment: "confirmed", maxSupportedTransactionVersion: 0 }));
+  } catch (err) {
+    // It landed but its result can't be read: treat as unknown, so trading stops until a person checks.
+    return result("timeout", t, {
+      signature,
+      executable: prep.val,
+      reason: `landed, but its result could not be read (${String(err).slice(0, 80)}); check https://solscan.io/tx/${signature}`,
+    });
+  }
   t.confirmed = now();
   const networkLamports =
     (info?.meta?.fee ?? BASE_FEE_LAMPORTS + deps.costSettings.priorityFeeLamports) +
