@@ -21,6 +21,7 @@ import { DEFAULT_PRIORS, LearningStats, scoreOpportunity } from "./stats.js";
 import { costSettings as makeCostSettings } from "./config.js";
 import { valueCycle, type Valuation } from "./costs.js";
 import { quoteCycle, specOf, twoLegSpec, type Cycle, type CycleSpec } from "./cycle.js";
+import { Rotation, triangleSpecs } from "./triangles.js";
 import { evaluateLadder, ladderSizes, pickBestSize } from "./sizer.js";
 import { liveExecute, quoteOnlyExecute, simulateExecute, type ExecResult } from "./executor.js";
 import { JitoClient } from "./jito.js";
@@ -73,6 +74,8 @@ const sleep = (ms: number, idle = false) =>
 const MAX_EVENT_SCANS_IN_A_ROW = 2;
 /** At most this many dirty tokens per event scan (each costs a quote per leg). */
 const EVENT_SCAN_TOKENS = 2;
+/** Triangles per triangle scan: 2 × 3 legs costs the same as a 3-token two-leg scan. */
+const TRIANGLES_PER_SCAN = 2;
 
 async function main() {
   installConsoleRedaction();
@@ -176,6 +179,8 @@ async function main() {
   const lastPools = new Map<string, string[]>();
   let quoteMsAvg: number | undefined;
   let eventScans = 0;
+  let fullScans = 0;
+  const triangleTurns = new Rotation<CycleSpec>();
   // Older versions let quote-only paper wins lower the profit bar. Without any
   // result checked on-chain, there is no real evidence for that: undo it.
   if (brain.restoredFromBackup) log.warn("brain file was unreadable; restored what it learned from the backup copy");
@@ -427,19 +432,30 @@ async function main() {
       // (with a full scan every few turns so nothing else is ignored).
       const dirty = (watcher?.takeDirty() ?? []).filter((d) => d.symbol in scannable);
       const marketTs = new Map<string, number>();
-      let tokens: Record<string, string>;
+      let tokens: Record<string, string> = {};
+      let triangles: CycleSpec[] = [];
       if (dirty.length && eventScans < MAX_EVENT_SCANS_IN_A_ROW) {
         eventScans += 1;
         tokens = Object.fromEntries(dirty.slice(0, EVENT_SCAN_TOKENS).map((d) => [d.symbol, scannable[d.symbol]]));
         for (const d of dirty.slice(EVENT_SCAN_TOKENS)) watcher!.remark(d.symbol, d.ts);
       } else {
         eventScans = 0;
-        tokens = brain.pickTokens(scannable);
+        fullScans += 1;
+        // Every few full scans: triangles through the pivot, among configured tokens it may act on.
+        if (cfg.triangles && fullScans % cfg.triangleEvery === 0) {
+          const liquid = Object.fromEntries(
+            Object.entries(scannable).filter(([sym, mint]) => sym in cfg.tokens && canAct(safetyOf(sym, mint).state, cfg.mode)),
+          );
+          triangles = triangleTurns.take(triangleSpecs(liquid, cfg.trianglePivot), TRIANGLES_PER_SCAN);
+        }
+        if (!triangles.length) tokens = brain.pickTokens(scannable);
         for (const d of dirty) if (!(d.symbol in tokens)) watcher!.remark(d.symbol, d.ts);
       }
       for (const d of dirty) if (d.symbol in tokens) marketTs.set(d.symbol, d.ts);
       scanTimes.push(Date.now());
-      const specs: CycleSpec[] = Object.entries(tokens).map(([sym, mint]) => twoLegSpec(sym, mint));
+      const specs: CycleSpec[] = triangles.length
+        ? triangles
+        : Object.entries(tokens).map(([sym, mint]) => twoLegSpec(sym, mint));
       const buckets: Record<string, SizeBucket> = {};
       const sizeFor = (spec: CycleSpec) => {
         const pick = brain.pickSize(spec.symbol, sizeUsd);
@@ -498,6 +514,7 @@ async function main() {
       }
       for (const { cycle, val } of scored) {
         brain.observeScan(cycle.symbol, val.netBps, val.netUsd, buckets[cycle.symbol]);
+        if (cycle.kind !== "two-leg") continue; // price moves are tracked per token, on its own round trip
         const wasHot = brain.isHot(cycle.symbol);
         const leg1 = cycle.legs[0];
         const move = brain.observePrice(cycle.symbol, buckets[cycle.symbol], Number(leg1.outAmount) / Number(leg1.inAmount));

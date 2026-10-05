@@ -83,6 +83,18 @@ export function renderReport(d: ReportData): string {
   out.push(`  still there at re-quote:    ${reached("executable")}  (${pct(reached("executable"), o.length)})`);
   out.push(`  simulated on-chain:         ${sims.length}  (OK: ${simOk.length}, ${pct(simOk.length, sims.length)})`);
   out.push(`Real trades (MICRO/LIVE):     ${submitted.length} sent, ${landed.length} landed, ${profitable.length} profitable, ${failed.length} failed`);
+  const kinds = [...new Set(o.map((r) => r.kind))];
+  if (kinds.length > 1) {
+    for (const k of kinds) {
+      const ks = o.filter((r) => r.kind === k);
+      const held = ks.filter((r) => STAGES.indexOf(r.stage) >= STAGES.indexOf("executable")).length;
+      out.push(
+        `  ${k}:`.padEnd(30) +
+          `${ks.length} acted on, ${pct(held, ks.length)} still there at re-quote, ` +
+          `${ks.filter((r) => r.simulated?.ok).length} simulated OK, ${ks.filter((r) => r.realized?.landed).length} landed`,
+      );
+    }
+  }
   out.push("");
   out.push(`Realized P&L (real money):    ${usd(realized)}`);
   out.push(`Quoted-only results:          ${usd(d.quotedOnlyUsd)}  (quotes alone; NOT profit)`);

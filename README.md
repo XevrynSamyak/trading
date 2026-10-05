@@ -126,6 +126,23 @@ that token (2 requests), re-checking it about every 2 seconds, with a full
 scan every third time so nothing else is ignored. Wallet balances (Helius)
 are read at most once a minute to stay well inside the free RPC plan.
 
+## Triangles and backtesting
+
+Every few full scans (`TRIANGLE_EVERY`, default 4) the bot quotes triangles
+through SOL instead of round trips: USDC → SOL → X → USDC and the reverse,
+for your configured tokens, two at a time in turn (3 quotes each, the same
+budget as a normal scan). All legs still go in one atomic transaction, with
+fewer route accounts per leg so they fit. Jupiter's router already mixes such
+paths into single legs, so triangles only help when the best route for each
+leg alone is not the best cycle; the report shows results per kind.
+
+`npm run backtest` replays the recorded opportunities under stricter rules
+(higher profit bar, higher expected value, lower price impact, fresher
+quotes, one kind only, event-triggered only, without the worst token), shows
+how fast gaps die (share still there at the re-quote by quote age) and
+compares trade-size policies. It can only judge what the bot actually acted
+on: looser rules would need re-checks that never happened.
+
 ## Event triggers and latency
 
 Besides checking tokens in turn, the bot listens over the RPC's WebSocket to
@@ -177,6 +194,7 @@ npm run status           # is it running, what it's doing, test progress
 npm run watch            # same, live (refreshes every 5s)
 npm run report           # quoted vs simulated vs realized, risk, go-live verdict
 npm run benchmark        # measured latency to RPC, Jupiter, Jito, WebSocket
+npm run backtest         # replay recorded opportunities under stricter rules
 npm run stop-trading     # emergency stop; npm run enable-trading lifts it
 npm test
 ```

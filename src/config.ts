@@ -168,6 +168,11 @@ export interface Config {
   eventDebounceMs: number;
   /** Pools changing more often than this per minute carry no signal and are dropped for an hour. */
   busyPoolPerMin: number;
+  /** Triangular cycles USDC → pivot → X → USDC (and reverse) among configured tokens. */
+  triangles: boolean;
+  trianglePivot: string;
+  /** Every Nth full scan quotes triangles instead of two-leg round trips. */
+  triangleEvery: number;
   telegramBotToken?: string;
   telegramChatId?: string;
   dataDir: string;
@@ -281,6 +286,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     eventDailyCap: num(env, "EVENT_DAILY_CAP", 20_000),
     eventDebounceMs: num(env, "EVENT_DEBOUNCE_MS", 1_500),
     busyPoolPerMin: num(env, "BUSY_POOL_EVENTS_PER_MIN", 30),
+    triangles: env.TRIANGLES !== "off",
+    trianglePivot: env.TRIANGLE_PIVOT || "SOL",
+    triangleEvery: Math.max(2, Math.floor(num(env, "TRIANGLE_EVERY", 4))),
     telegramBotToken: env.TELEGRAM_BOT_TOKEN || undefined,
     telegramChatId: env.TELEGRAM_CHAT_ID || undefined,
     dataDir: env.DATA_DIR || "./data",
