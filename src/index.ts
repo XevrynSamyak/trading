@@ -15,7 +15,9 @@ import { discoverTokens } from "./discovery.js";
 import { Funnel, STAGES, buildOppRecord } from "./funnel.js";
 import { DEFAULT_PRIORS, LearningStats, scoreOpportunity } from "./stats.js";
 import { costSettings as makeCostSettings } from "./config.js";
-import { twoLegSpec, type CycleSpec } from "./cycle.js";
+import { valueCycle, type Valuation } from "./costs.js";
+import { quoteCycle, specOf, twoLegSpec, type Cycle, type CycleSpec } from "./cycle.js";
+import { evaluateLadder, ladderSizes, pickBestSize } from "./sizer.js";
 import { liveExecute, quoteOnlyExecute, simulateExecute, type ExecResult } from "./executor.js";
 import { JitoClient } from "./jito.js";
 import { JupiterClient } from "./jupiter.js";
@@ -369,7 +371,39 @@ async function main() {
         best.ev >= cfg.minExpectedProfitUsd &&
         best.cycle.priceImpactBps <= cfg.maxPriceImpactBps
       ) {
-        const { cycle, val } = best;
+        // Size ladder: try a few sizes (within every limit) and keep the best expected value.
+        let { cycle, val } = best;
+        let chosenP = best.p;
+        let chosenEv = best.ev;
+        let ladder: import("./funnel.js").OppRecord["ladder"];
+        let ladderSaysNo = false;
+        const sizes = ladderSizes(cfg.sizeLadderUsd, { maxUsd: sizeUsd, minUsd: 1 }, cfg.maxLadderPoints, best.val.inUsd);
+        if (sizes.length > 1) {
+          const evOf = (c: Cycle, v: Valuation) =>
+            learn.expectedValue(v.netUsd, v.costs.networkUsd, learn.probabilities(c.symbol, c.routes, cfg.mode, withWallet), cfg.mode, withWallet);
+          const points = await evaluateLadder(
+            sizes,
+            async (usd) => {
+              await waitForJupiter(best.cycle.legs.length);
+              const c = await quoteCycle(jup, specOf(best.cycle), usdToUsdcAtoms(usd), { marketTs: best.cycle.marketTs });
+              return { cycle: c, val: valueCycle(c, solPrice, costs) };
+            },
+            evOf,
+            cfg.maxPriceImpactBps,
+            best,
+            (usd, err) => log.warn(`size $${usd} quote failed: ${String(err).slice(0, 100)}`),
+          );
+          ladder = points.map((p) => ({ sizeUsd: p.sizeUsd, netUsd: p.val.netUsd, netBps: p.val.netBps, evUsd: p.evUsd, impactBps: p.impactBps }));
+          const top = pickBestSize(points);
+          if (top) {
+            cycle = top.cycle;
+            val = top.val;
+            chosenEv = top.evUsd;
+            chosenP = learn.probabilities(cycle.symbol, cycle.routes, cfg.mode, withWallet);
+          } else {
+            ladderSaysNo = true;
+          }
+        }
         const deps = {
           conn,
           jup,
@@ -382,8 +416,9 @@ async function main() {
         const legs = cycle.legs.length;
         let result: ExecResult;
         // A fresh quote of every leg, plus (to build a real transaction) one swap-instructions call per leg.
-        await waitForJupiter(simulateAs || isRealMoney(cfg.mode) ? legs * 2 : legs);
-        if (isRealMoney(cfg.mode) && wallet) result = await liveExecute(cycle, val, wallet, { ...deps, jito });
+        if (!ladderSaysNo) await waitForJupiter(simulateAs || isRealMoney(cfg.mode) ? legs * 2 : legs);
+        if (ladderSaysNo) result = { status: "skipped", netUsd: 0, feeUsd: 0, t: {}, reason: "no trade size had positive expected value at fresh quotes" };
+        else if (isRealMoney(cfg.mode) && wallet) result = await liveExecute(cycle, val, wallet, { ...deps, jito });
         else if (simulateAs) result = await simulateExecute(cycle, val, simulateAs, deps);
         else result = await quoteOnlyExecute(cycle, val, deps);
 
@@ -395,8 +430,9 @@ async function main() {
           val,
           result,
           decisionTs,
-          expected: { pSuccess: best.p.success, evUsd: best.ev, assumed: best.p.assumed },
+          expected: { pSuccess: chosenP.success, evUsd: chosenEv, assumed: chosenP.assumed },
           solPriceUsd: solPrice,
+          ladder,
         });
         funnel.record(opp);
         learn.observe(opp);

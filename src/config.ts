@@ -114,6 +114,10 @@ export interface Config {
   landingPrior: number;
   /** Reject sizes whose quoted price impact exceeds this (bps). */
   maxPriceImpactBps: number;
+  /** Size ladder (USD) evaluated on candidates; capped by wallet, exposure, MAX_TRADE_USD, MICRO cap. */
+  sizeLadderUsd: number[];
+  /** At most this many sizes per candidate (each costs one quote per leg). 1 = off. */
+  maxLadderPoints: number;
   tokens: Record<string, string>;
   /** Fraction of the wallet's USDC used per trade; trades grow as the wallet grows. */
   tradeSizePct: number;
@@ -203,6 +207,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     minExpectedProfitUsd: num(env, "MIN_EXPECTED_PROFIT_USD", 0.001),
     landingPrior: num(env, "LANDING_PRIOR", 0.5),
     maxPriceImpactBps: num(env, "MAX_PRICE_IMPACT_BPS", 100),
+    sizeLadderUsd: (env.SIZE_LADDER_USD || "10,25,50,100,250,500,750,1000,1500,2000,3000,5000")
+      .split(",")
+      .map((x) => Number(x.trim()))
+      .filter((x) => Number.isFinite(x) && x > 0)
+      .sort((a, b) => a - b),
+    maxLadderPoints: Math.max(1, Math.floor(num(env, "MAX_LADDER_POINTS", 4))),
     tokens,
     tradeSizePct: num(env, "TRADE_SIZE_PCT", 0.8),
     maxTradeUsd: num(env, "MAX_TRADE_USD", 0),
