@@ -1,5 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { writeJsonAtomic } from "./atomic.js";
 import type { Mode } from "./config.js";
 
 /** Snapshot the bot writes after every cycle so `npm run status` can show live progress. */
@@ -30,10 +30,8 @@ export interface LiveStatus {
 }
 
 export function writeStatus(path: string, status: LiveStatus): void {
-  mkdirSync(dirname(path), { recursive: true });
   // Write then rename, so a reader never sees a half-written file.
-  writeFileSync(`${path}.tmp`, JSON.stringify(status));
-  renameSync(`${path}.tmp`, path);
+  writeJsonAtomic(path, status);
 }
 
 export function readStatus(path: string): LiveStatus | null {

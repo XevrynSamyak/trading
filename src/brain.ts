@@ -1,5 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { readJsonWithBackup, writeJsonAtomic } from "./atomic.js";
 
 /**
  * The bot's learning "brain". No AI API calls (too slow for arbitrage and it
@@ -187,18 +186,19 @@ export class Brain {
     }
   }
 
+  /** True when the main brain file was unreadable and the backup copy was used. */
+  restoredFromBackup = false;
+
   private load(): Partial<BrainState> | null {
-    if (!existsSync(this.path)) return null;
-    try {
-      return JSON.parse(readFileSync(this.path, "utf8")) as Partial<BrainState>;
-    } catch {
-      return null;
-    }
+    const read = readJsonWithBackup<Partial<BrainState>>(this.path);
+    if (!read) return null;
+    this.restoredFromBackup = read.fromBackup;
+    return read.value;
   }
 
+  /** Crash-safe: a power cut mid-save can no longer wipe what the brain learned. */
   save(): void {
-    mkdirSync(dirname(this.path), { recursive: true });
-    writeFileSync(this.path, JSON.stringify(this.state, null, 2));
+    writeJsonAtomic(this.path, this.state, { backup: true, pretty: true });
   }
 
   private stats(symbol: string): TokenStats {

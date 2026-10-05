@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { signingKeyFrom } from "./secrets.js";
 
 export const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 export const USDC_DECIMALS = 6;
@@ -14,7 +15,15 @@ export const DEFAULT_TOKENS: Record<string, string> = {
   RAY: "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R",
 };
 
-export type Mode = "paper" | "live";
+/**
+ * paper: nothing is ever signed or sent (quote-only, or simulated on-chain
+ *        when WALLET_PUBLIC_KEY is set).
+ * micro: real transactions with a hard tiny size cap, to prove execution.
+ * live:  adaptive sizing; refused at startup unless MICRO results pass the gate.
+ */
+export type Mode = "paper" | "micro" | "live";
+export const REAL_MONEY_MODES: readonly Mode[] = ["micro", "live"];
+export const isRealMoney = (mode: Mode) => REAL_MONEY_MODES.includes(mode);
 
 /** Tokens quoted per scan; each needs 2 Jupiter requests (buy leg + sell leg). */
 export const TOKENS_PER_SCAN = 3;
@@ -77,9 +86,12 @@ export interface Config {
   jupiterApiKey?: string;
   /** Jupiter requests allowed per minute (30 keyless, 60 free key, more on paid plans). */
   jupiterRpm: number;
-  walletSecretKey?: string;
-  /** Public address only: lets paper mode test trades on-chain without the secret key. */
+  /** Base58 secret key used to SIGN (micro/live only). PRIVATE_SIGNING_KEY, or the older WALLET_SECRET_KEY. */
+  signingKey?: string;
+  /** Public address only: lets paper mode test trades on-chain without any secret. */
   walletPublicKey?: string;
+  /** MICRO mode: hard cap per trade in USD (proves execution with tiny real trades). */
+  microMaxTradeUsd: number;
   /** How live trades are sent: "jito" (failed attempts cost nothing) or plain "rpc". */
   sendVia: "jito" | "rpc";
   jitoUrl: string;
@@ -134,12 +146,13 @@ export function parsePairs(raw: string | undefined): Record<string, string> {
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
-  const mode: Mode = env.MODE === "live" ? "live" : "paper";
-  if (mode === "live" && env.LIVE_TRADING_CONFIRM !== "yes") {
-    throw new Error("MODE=live also requires LIVE_TRADING_CONFIRM=yes (real money will be traded)");
+  const mode: Mode = env.MODE === "live" ? "live" : env.MODE === "micro" ? "micro" : "paper";
+  const signingKey = signingKeyFrom(env);
+  if (isRealMoney(mode) && env.LIVE_TRADING_CONFIRM !== "yes") {
+    throw new Error(`MODE=${mode} also requires LIVE_TRADING_CONFIRM=yes (real money will be traded)`);
   }
-  if (mode === "live" && !env.WALLET_SECRET_KEY) {
-    throw new Error("MODE=live requires WALLET_SECRET_KEY (base58) of a fresh, dedicated wallet");
+  if (isRealMoney(mode) && !signingKey) {
+    throw new Error(`MODE=${mode} requires PRIVATE_SIGNING_KEY (base58) of a fresh, dedicated wallet`);
   }
 
   const startingBalanceUsd = num(env, "STARTING_BALANCE_USD", 25);
@@ -157,8 +170,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     jupiterApi: jupiterUrl(env.JUPITER_API, "/swap/v1", jupiterApiKey),
     jupiterApiKey,
     jupiterRpm,
-    walletSecretKey: env.WALLET_SECRET_KEY || undefined,
-    walletPublicKey: env.WALLET_PUBLIC_KEY || undefined,
+    signingKey,
+    walletPublicKey: env.WALLET_PUBLIC_KEY?.trim() || undefined,
+    microMaxTradeUsd: num(env, "MICRO_MAX_TRADE_USD", 5),
     sendVia,
     jitoUrl: (env.JITO_URL || "https://mainnet.block-engine.jito.wtf/api/v1").replace(/\/$/, ""),
     jitoTipLamports: num(env, "JITO_TIP_LAMPORTS", 10_000),
@@ -170,7 +184,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     priorityFeeLamports: num(env, "PRIORITY_FEE_LAMPORTS", sendVia === "jito" ? 1_000 : 10_000),
     computeUnitLimit: num(env, "COMPUTE_UNIT_LIMIT", 600_000),
     startingBalanceUsd,
-    lossFloorUsd: num(env, "LOSS_FLOOR_USD", +(startingBalanceUsd * 0.7).toFixed(2)),
+    // Drawdown floor: LOSS_FLOOR_USD, or LOSS_FLOOR_PCT of the starting balance (default 70%).
+    lossFloorUsd: num(env, "LOSS_FLOOR_USD", +(startingBalanceUsd * num(env, "LOSS_FLOOR_PCT", 0.7)).toFixed(2)),
     dailyLossLimitUsd: num(env, "DAILY_LOSS_LIMIT_USD", 2),
     maxConsecutiveFailures: num(env, "MAX_CONSECUTIVE_FAILURES", 5),
     failureCooldownMs: num(env, "FAILURE_COOLDOWN_MS", 10 * 60_000),
@@ -190,6 +205,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 
   if (!(cfg.tradeSizePct > 0 && cfg.tradeSizePct <= 1)) {
     throw new Error("TRADE_SIZE_PCT must be in (0, 1]");
+  }
+  if (!(cfg.microMaxTradeUsd > 0 && cfg.microMaxTradeUsd <= 25)) {
+    throw new Error("MICRO_MAX_TRADE_USD must be between 0 and 25 (MICRO is for tiny proof trades)");
   }
   if (cfg.lossFloorUsd >= cfg.startingBalanceUsd) {
     throw new Error("LOSS_FLOOR_USD must be below STARTING_BALANCE_USD");

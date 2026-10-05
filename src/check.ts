@@ -1,5 +1,7 @@
 import { Connection, PublicKey } from "@solana/web3.js";
-import { loadConfig, maxScansPerMin } from "./config.js";
+import { isRealMoney, loadConfig, maxScansPerMin } from "./config.js";
+import { installConsoleRedaction } from "./log.js";
+import { checkSecrets } from "./secrets.js";
 import { JitoClient } from "./jito.js";
 import { JupiterClient } from "./jupiter.js";
 import { fetchSolPriceUsd } from "./scanner.js";
@@ -26,9 +28,15 @@ async function step(name: string, fn: () => Promise<string>): Promise<boolean> {
 }
 
 async function main() {
+  installConsoleRedaction();
   const cfg = loadConfig();
-  console.log(`Mode: ${cfg.mode}`);
+  console.log(`Mode: ${cfg.mode}${isRealMoney(cfg.mode) ? "  (REAL MONEY)" : "  (nothing is ever sent)"}`);
   console.log(`RPC:  ${maskUrl(cfg.rpcUrl)}\n`);
+
+  const secrets = checkSecrets(process.env, { mode: cfg.mode, envFilePath: ".env" });
+  for (const e of secrets.errors) console.log(`FAIL  Settings: ${e}`);
+  for (const w of secrets.warnings) console.log(`WARN  Settings: ${w}`);
+  if (!secrets.errors.length) console.log("OK    Settings: no secrets in the wrong place");
 
   const conn = new Connection(cfg.rpcUrl, "confirmed");
   const jup = new JupiterClient(cfg.jupiterApi, fetch, cfg.jupiterApiKey);
@@ -56,10 +64,10 @@ async function main() {
     }),
   ];
 
-  const owner = cfg.walletSecretKey
-    ? loadKeypair(cfg.walletSecretKey).publicKey
-    : cfg.walletPublicKey
-      ? new PublicKey(cfg.walletPublicKey)
+  const owner = cfg.walletPublicKey
+    ? new PublicKey(cfg.walletPublicKey)
+    : cfg.signingKey
+      ? loadKeypair(cfg.signingKey).publicKey
       : undefined;
   if (owner) {
     results.push(
@@ -86,13 +94,13 @@ async function main() {
     console.log("SKIP  Wallet: none set (add WALLET_PUBLIC_KEY for realistic on-chain paper testing)");
   }
 
-  if (cfg.mode === "live" && cfg.sendVia === "jito") {
+  if (isRealMoney(cfg.mode) && cfg.sendVia === "jito") {
     results.push(
       await step("Jito", async () => `${(await new JitoClient(cfg.jitoUrl).getTipAccounts()).length} tip accounts`),
     );
   }
 
-  const ok = results.every(Boolean);
+  const ok = results.every(Boolean) && secrets.errors.length === 0;
   console.log(ok ? "\nAll good. Start the bot." : "\nFix the FAIL lines above before starting the bot.");
   process.exit(ok ? 0 : 1);
 }

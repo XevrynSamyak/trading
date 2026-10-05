@@ -2,7 +2,7 @@ import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } fro
 import { join } from "node:path";
 import { Brain, EDGE_BINS } from "./brain.js";
 import { loadConfig } from "./config.js";
-import { Ledger, startOfUtcDay, type TradeRecord } from "./ledger.js";
+import { Ledger, startOfUtcDay, totalsByBasis, type Basis, type TradeRecord } from "./ledger.js";
 import { assessReadiness } from "./readiness.js";
 import { readStatus, type LiveStatus } from "./status-file.js";
 
@@ -132,17 +132,20 @@ export function renderStatus(i: StatusInput): string {
     out.push(`Go live? ${colored}  ${dim(r.message)}`);
   }
 
-  // --- results --------------------------------------------------------------
-  const today = i.records.filter((r) => r.ts >= startOfUtcDay(i.now));
-  const count = (rs: TradeRecord[], st: string) => rs.filter((r) => r.status === st).length;
-  const sum = (rs: TradeRecord[]) => rs.reduce((s, r) => s + r.netUsd, 0);
+  // --- results: quoted, simulated and realized are NEVER added together ------
+  const allT = totalsByBasis(i.records);
+  const todayT = totalsByBasis(i.records, startOfUtcDay(i.now));
+  const failed = i.records.filter((r) => r.status === "failed").length;
+  const fake = i.records.filter((r) => r.status === "rejected").length;
   out.push("");
-  out.push(bold("Results"));
-  out.push(`  today: ${count(today, "filled")} trades, ${count(today, "rejected")} fake gaps, ${money(sum(today))}`);
-  out.push(
-    `  total: ${count(i.records, "filled")} trades, ${count(i.records, "rejected")} fake gaps, ` +
-      `${count(i.records, "failed")} failed, ${money(sum(i.records))}`,
-  );
+  out.push(bold("Results") + dim("  (today / all time)"));
+  const row = (name: string, b: Basis, note: string) =>
+    `  ${name.padEnd(22)} ${String(todayT[b].count).padStart(3)} / ${String(allT[b].count).padEnd(4)} ` +
+    `${money(todayT[b].netUsd)} / ${money(allT[b].netUsd)}  ${dim(note)}`;
+  out.push(yellow(row("quoted (not profit)", "quoted", "quotes only, unproven")));
+  out.push(row("simulated on-chain", "simulated", "exact tx simulated, nothing sent"));
+  out.push(row("realized (real money)", "realized", "landed transactions"));
+  out.push(`  fake gaps (cost nothing): ${fake}   failed on-chain: ${failed}`);
 
   // --- how close gaps got ---------------------------------------------------
   const total = Object.values(i.edgeHistogram).reduce((a, b) => a + b, 0);

@@ -6,6 +6,7 @@ import { RequestBudget, budgetedFetch } from "./budget.js";
 import {
   TOKENS_PER_SCAN,
   extraFeeLamports,
+  isRealMoney,
   jupiterRateWindows,
   loadConfig,
   maxScansPerMin,
@@ -15,10 +16,12 @@ import { discoverTokens } from "./discovery.js";
 import { liveExecute, paperExecute, simulateExecute, type ExecResult } from "./executor.js";
 import { JitoClient } from "./jito.js";
 import { JupiterClient } from "./jupiter.js";
-import { Ledger, startOfUtcDay, startOfUtcMonth } from "./ledger.js";
+import { Ledger, basisOf, moneyBasis, startOfUtcDay, startOfUtcMonth, type Basis } from "./ledger.js";
+import { installConsoleRedaction, log } from "./log.js";
 import { makeNotifier } from "./notify.js";
 import { usdToUsdcAtoms } from "./profit.js";
 import { RiskManager } from "./risk.js";
+import { checkSecrets } from "./secrets.js";
 import { fetchSolPriceUsd, scan } from "./scanner.js";
 import { writeStatus, type LiveStatus } from "./status-file.js";
 import { formatVerdict, monthVerdict, shouldRetire } from "./sustain.js";
@@ -43,11 +46,19 @@ const sleep = (ms: number) =>
   });
 
 async function main() {
+  installConsoleRedaction();
   const cfg = loadConfig();
+  const secrets = checkSecrets(process.env, { mode: cfg.mode, envFilePath: ".env" });
+  for (const w of secrets.warnings) log.warn(w);
+  if (secrets.errors.length) {
+    for (const e of secrets.errors) log.error(e);
+    log.error("Refusing to start until the settings above are fixed.");
+    process.exit(1);
+  }
   const notify = makeNotifier(cfg);
   const haltFile = join(cfg.dataDir, "HALTED");
   if (existsSync(haltFile)) {
-    console.error(`Bot is halted (${haltFile}). Read it, then delete it to restart.`);
+    log.error(`Bot is halted (${haltFile}). Read it, then delete it to restart.`);
     process.exit(1);
   }
 
@@ -57,9 +68,12 @@ async function main() {
   const jupFetch = budgetedFetch(budget);
   const jup = new JupiterClient(cfg.jupiterApi, jupFetch, cfg.jupiterApiKey);
   const conn = new Connection(cfg.rpcUrl, "confirmed");
-  const wallet: Keypair | undefined = cfg.walletSecretKey ? loadKeypair(cfg.walletSecretKey) : undefined;
-  // Paper mode only needs the public address to test trades on-chain.
-  const owner = wallet?.publicKey ?? (cfg.walletPublicKey ? new PublicKey(cfg.walletPublicKey) : undefined);
+  // Only real-money modes ever hold a signer. Paper mode only needs the public address.
+  const wallet: Keypair | undefined = isRealMoney(cfg.mode) && cfg.signingKey ? loadKeypair(cfg.signingKey) : undefined;
+  const owner =
+    wallet?.publicKey ??
+    (cfg.walletPublicKey ? new PublicKey(cfg.walletPublicKey) : cfg.signingKey ? loadKeypair(cfg.signingKey).publicKey : undefined);
+  const money: Basis = moneyBasis(cfg.mode);
   const jito = cfg.sendVia === "jito" ? new JitoClient(cfg.jitoUrl) : undefined;
   const ledger = new Ledger(join(cfg.dataDir, `trades-${cfg.mode}.jsonl`));
   const brain = new Brain(join(cfg.dataDir, `brain-${cfg.mode}.json`), {
@@ -72,6 +86,7 @@ async function main() {
   const risk = new RiskManager(cfg);
   // Older versions let quote-only paper wins lower the profit bar. Without any
   // result checked on-chain, there is no real evidence for that: undo it.
+  if (brain.restoredFromBackup) log.warn("brain file was unreadable; restored what it learned from the backup copy");
   if (brain.minProfitBps < cfg.minProfitBps && !ledger.all().some((r) => r.verified && r.status === "filled")) {
     brain.state.minProfitBps = cfg.minProfitBps;
   }
@@ -101,7 +116,7 @@ async function main() {
     try {
       tipAccounts = (await jito.getTipAccounts()).map((a) => new PublicKey(a));
     } catch (err) {
-      console.warn(`could not load Jito tip accounts (will retry): ${String(err).slice(0, 120)}`);
+      log.warn(`could not load Jito tip accounts (will retry): ${String(err).slice(0, 120)}`);
     }
   };
   const pickTip = () => (tipAccounts.length ? tipAccounts[Math.floor(Math.random() * tipAccounts.length)] : undefined);
@@ -151,18 +166,18 @@ async function main() {
     }
   };
 
-  const how =
-    cfg.mode === "live"
-      ? `sending via ${cfg.sendVia.toUpperCase()}`
-      : owner
-        ? "testing each trade on-chain with your wallet's public address (nothing is sent)"
-        : "quote-only (add WALLET_PUBLIC_KEY for realistic on-chain testing)";
+  const how = isRealMoney(cfg.mode)
+    ? `REAL transactions via ${cfg.sendVia.toUpperCase()}` +
+      (cfg.mode === "micro" ? `, capped at $${cfg.microMaxTradeUsd} per trade` : "")
+    : owner
+      ? "testing each trade on-chain with your wallet's public address (nothing is sent)"
+      : "quote-only (add WALLET_PUBLIC_KEY for realistic on-chain testing; quoted amounts are not profit)";
   await notify(
     `Started in ${cfg.mode.toUpperCase()} mode, ${how}` +
       (owner ? `. Wallet ${owner.toBase58()}` : "") +
       `. Loss floor $${cfg.lossFloorUsd}, no profit cap. SOL=$${solPrice.toFixed(2)}`,
   );
-  console.log(
+  log.info(
     `Jupiter: ${cfg.jupiterApiKey ? "using your API key" : "no API key"} (${cfg.jupiterRpm} requests/min), ` +
       `so up to ~${maxScansPerMin(cfg.jupiterMsPerRequest).toFixed(1)} full scans/min, ` +
       `or ~${maxScansPerMin(cfg.jupiterMsPerRequest, 2).toFixed(0)} focus scans/min on a moving token`,
@@ -185,9 +200,9 @@ async function main() {
             cfg.jupiterApiKey,
           );
           const added = brain.learnTokens(found, cfg.tokens, cfg.maxTokens);
-          if (added.length) console.log(`brain found new tokens to watch: ${added.join(", ")}`);
+          if (added.length) log.event(`brain found new tokens to watch: ${added.join(", ")}`);
         } catch (err) {
-          console.warn(`token discovery failed (keeps current list): ${String(err).slice(0, 120)}`);
+          log.warn(`token discovery failed (keeps current list): ${String(err).slice(0, 120)}`);
         }
       }
       await refreshTipAccounts();
@@ -199,33 +214,38 @@ async function main() {
       }
 
       const records = ledger.all();
+      // Only simulated (paper) or realized (micro/live) amounts count as money; quoted never does.
+      const moneyRecords = records.filter((r) => basisOf(r) === money);
 
       // Daily and monthly bookkeeping.
       if (startOfUtcDay(now) !== lastDay) {
-        const pnl = ledger.pnlBetween(lastDay, startOfUtcDay(now), records);
+        const pnl = ledger.pnlBetween(lastDay, startOfUtcDay(now), records, [money]);
+        const quoted = ledger.pnlBetween(lastDay, startOfUtcDay(now), records, ["quoted"]);
         await notify(
-          `Daily: ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(4)}\n` +
+          `Daily ${money} P&L: ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(4)}` +
+            (quoted ? ` (quotes alone suggested $${quoted.toFixed(4)}; not real)` : "") +
+            "\n" +
             brain.thoughts(cfg.minProfitBps).map((t) => `- ${t}`).join("\n"),
         );
         lastDay = startOfUtcDay(now);
       }
       if (startOfUtcMonth(now) !== lastMonth) {
-        await notify(formatVerdict(monthVerdict(records, lastMonth, cfg.monthlyCostsUsd)));
+        await notify(formatVerdict(monthVerdict(moneyRecords, lastMonth, cfg.monthlyCostsUsd)));
         lastMonth = startOfUtcMonth(now);
-        if (shouldRetire(records, now, cfg.monthlyCostsUsd, cfg.sustainStopAfterMonths, records[0]?.ts)) {
+        if (shouldRetire(moneyRecords, now, cfg.monthlyCostsUsd, cfg.sustainStopAfterMonths, moneyRecords[0]?.ts)) {
           await halt(`did not cover its bills for ${cfg.sustainStopAfterMonths} months in a row`);
         }
       }
 
-      // Wallet value: real on-chain in live mode, simulated P&L in paper mode.
-      const paperValue = cfg.startingBalanceUsd + records.reduce((s, r) => s + r.netUsd, 0);
+      // Wallet value: real on-chain in micro/live; in paper, start + simulated P&L only.
+      const paperValue = cfg.startingBalanceUsd + moneyRecords.reduce((s, r) => s + r.netUsd, 0);
       let valueUsd = paperValue;
       let usdcUsd = paperValue;
       let simulateAs: PublicKey | undefined;
       if (owner && balanceCache) {
         const b = await balanceCache.get();
         const realUsdc = Number(b.usdcAtoms) / 1e6;
-        if (cfg.mode === "live") {
+        if (isRealMoney(cfg.mode)) {
           valueUsd = walletValueUsd(b, solPrice);
           usdcUsd = realUsdc;
         } else if (realUsdc >= 1 && b.lamports / 1e9 >= MIN_SOL_TO_SIMULATE) {
@@ -234,26 +254,27 @@ async function main() {
           simulateAs = owner;
         } else if (!warnedUnfunded) {
           warnedUnfunded = true;
-          console.warn(
+          log.warn(
             `wallet needs at least $1 USDC and ${MIN_SOL_TO_SIMULATE} SOL to test on-chain; quote-only until funded`,
           );
         }
       }
 
-      const decision = risk.check(valueUsd, ledger.pnlBetween(startOfUtcDay(now), undefined, records), now);
+      const decision = risk.check(valueUsd, ledger.pnlBetween(startOfUtcDay(now), undefined, records, [money]), now);
       publish({ walletValueUsd: valueUsd, onChainTesting: cfg.mode === "paper" && !!simulateAs });
       if (!decision.ok) {
         if (decision.halt) await halt(decision.reason);
         publish({ state: "paused", note: decision.reason, nextScanInMs: cfg.scanIntervalMs * 4 });
-        console.log(`paused: ${decision.reason}`);
+        log.event(`paused: ${decision.reason}`);
         await sleep(cfg.scanIntervalMs * 4);
         continue;
       }
 
-      const sizeUsd = tradeSizeUsd(cfg, usdcUsd);
+      let sizeUsd = tradeSizeUsd(cfg, usdcUsd);
+      if (cfg.mode === "micro") sizeUsd = Math.min(sizeUsd, cfg.microMaxTradeUsd);
       if (sizeUsd < 1) {
         publish({ state: "waiting", note: `only $${usdcUsd.toFixed(2)} USDC available`, nextScanInMs: cfg.scanIntervalMs * 4 });
-        console.log(`only $${usdcUsd.toFixed(2)} USDC available; waiting`);
+        log.info(`only $${usdcUsd.toFixed(2)} USDC available; waiting`);
         await sleep(cfg.scanIntervalMs * 4);
         continue;
       }
@@ -275,7 +296,7 @@ async function main() {
         (sym, err) => {
           if (!running) return; // stopping: skip the remaining quotes quietly
           if (String(err).includes(" 429")) rateLimited = true;
-          console.warn(`quote ${sym} failed: ${String(err).slice(0, 120)}`);
+          log.warn(`quote ${sym} failed: ${String(err).slice(0, 120)}`);
         },
         // Each token costs 2 requests; wait until they fit in every rate window.
         async () => {
@@ -288,7 +309,7 @@ async function main() {
         const wasHot = brain.isHot(o.symbol);
         const move = brain.observePrice(o.symbol, buckets[o.symbol], Number(o.leg1.outAmount) / Number(o.leg1.inAmount));
         if (move !== null && !wasHot && brain.isHot(o.symbol)) {
-          console.log(`${o.symbol} is moving fast (${move.toFixed(0)}bps); watching it closely`);
+          log.event(`${o.symbol} is moving fast (${move.toFixed(0)}bps); watching it closely`);
         }
       }
       if (opps[0]) brain.observeCycle(opps[0].eval.netBps, opps[0].symbol);
@@ -298,8 +319,8 @@ async function main() {
       const best = [...opps].sort((a, b) => expected(b) - expected(a))[0];
       if (best) {
         const exp = expected(best);
-        console.log(
-          `best ${best.symbol} $${best.eval.inUsd.toFixed(2)}: net ${best.eval.netBps.toFixed(1)}bps ` +
+        log.info(
+          `best ${best.symbol} $${best.eval.inUsd.toFixed(2)}: quoted net ${best.eval.netBps.toFixed(1)}bps ` +
             (Math.abs(exp - best.eval.netBps) >= 0.1 ? `(expect ${exp.toFixed(1)}) ` : "") +
             `($${best.eval.netUsd.toFixed(4)}) need ${brain.minProfitBps}bps [${best.routes}]`,
         );
@@ -309,8 +330,8 @@ async function main() {
         const deps = { conn, jup, cfg, solPriceUsd: solPrice, tipAccount: pickTip() };
         let result: ExecResult;
         // Building a real transaction re-quotes once and fetches two sets of swap instructions.
-        if (simulateAs || cfg.mode === "live") await waitForJupiter(3);
-        if (cfg.mode === "live" && wallet) result = await liveExecute(best, wallet, { ...deps, jito });
+        if (simulateAs || isRealMoney(cfg.mode)) await waitForJupiter(3);
+        if (isRealMoney(cfg.mode) && wallet) result = await liveExecute(best, wallet, { ...deps, jito });
         else if (simulateAs) result = await simulateExecute(best, simulateAs, deps);
         else result = paperExecute(best);
 
@@ -325,22 +346,29 @@ async function main() {
           signature: result.signature,
           reason: result.reason,
           verified: result.verified,
+          basis: isRealMoney(cfg.mode) ? "realized" : result.verified ? "simulated" : "quoted",
         });
         brain.observeTrade(best.symbol, result.status, result.netUsd, result.verified === true);
         // A landed trade moved real money: read fresh balances next cycle.
-        if (cfg.mode === "live" && (result.status === "filled" || result.status === "failed")) balanceCache?.invalidate();
+        if (isRealMoney(cfg.mode) && (result.status === "filled" || result.status === "failed")) balanceCache?.invalidate();
         if (result.verified && (result.status === "filled" || result.status === "rejected")) {
           const realBps = result.status === "filled" ? (result.netUsd / best.eval.inUsd) * 10_000 : 0;
           brain.observeReality(best.symbol, best.eval.netBps, realBps);
         }
         risk.recordResult(result.status);
 
+        const label = isRealMoney(cfg.mode)
+          ? `${result.status.toUpperCase()} (real)`
+          : result.verified
+            ? `SIMULATED ${result.status === "filled" ? "OK" : result.status.toUpperCase()}`
+            : "QUOTE-ONLY (not real profit)";
+        const amount = isRealMoney(cfg.mode) ? "realized" : result.verified ? "simulated" : "quoted";
         const line =
-          `${result.status.toUpperCase()} ${best.symbol} $${best.eval.inUsd.toFixed(2)}: net $${result.netUsd.toFixed(4)}` +
+          `${label} ${best.symbol} $${best.eval.inUsd.toFixed(2)}: ${amount} net $${result.netUsd.toFixed(4)}` +
           (result.signature ? ` https://solscan.io/tx/${result.signature}` : "") +
           (result.reason ? ` (${result.reason})` : "");
         if (result.status === "filled" || result.status === "failed") await notify(line);
-        else console.log(line);
+        else log.event(line);
       }
 
       brain.observePace(rateLimited);
@@ -348,7 +376,7 @@ async function main() {
       const focus = brain.plannedRequests() < TOKENS_PER_SCAN * 2 ? brain.hotSymbols() : [];
       if (rateLimited) {
         nextWaitMs = Math.max(nextWaitMs, RATE_LIMIT_BACKOFF_MS);
-        console.warn(`Jupiter says too many requests; slowing down (safe pace now ${brain.paceFloorMs / 1000}s)`);
+        log.warn(`Jupiter says too many requests; slowing down (safe pace now ${brain.paceFloorMs / 1000}s)`);
       }
       publish({
         state: "scanning",
@@ -369,7 +397,7 @@ async function main() {
       });
       brain.save();
     } catch (err) {
-      console.error("cycle error:", err);
+      log.error("cycle error:", err);
       publish({ note: `last cycle error: ${String(err).slice(0, 100)}`, nextScanInMs: nextWaitMs });
     }
     await sleep(nextWaitMs);
@@ -381,6 +409,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error(err);
+  log.error(err);
   process.exit(1);
 });

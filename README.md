@@ -48,10 +48,12 @@ paper mode, and it stops on its own before losing more than you allow.
      plain language, what it noticed and why it acts that way
 2. **Scanner** quotes USDC → token → USDC for each one and subtracts
    network fees.
-3. If the net profit beats the brain's current threshold, **executor** puts
-   *both legs in one transaction*, with an on-chain minimum output that
-   guarantees profit. If prices moved, the whole transaction reverts
-   (usually caught in simulation, so no fee at all).
+3. If the expected net profit beats the bar, **executor** re-quotes and puts
+   *all legs in one transaction*, with an on-chain minimum output of
+   input + estimated costs + minimum profit. If prices moved, the whole
+   transaction reverts instead of filling at a loss. (The minimum covers the
+   USDC side; network costs are estimated in SOL, so realized profit can
+   still differ slightly from the estimate.)
 4. Results go to the **ledger**; the brain learns from them (pickier after
    failures, looser after wins, less trust in tokens whose gaps turn out
    fake) and saves what it learned to disk.
@@ -74,11 +76,14 @@ tested results: `KEEP-TESTING`, `NO-GAPS`, `VERIFY-FIRST`, `ALL-FAKE`,
 
 ## Live trading through Jito
 
-Live trades go through Jito's block engine as revert-protected transactions
-(`SEND_VIA=jito`, the default): if the gap is gone, the transaction is
-dropped and **costs nothing**. The tip (`JITO_TIP_LAMPORTS`) is only paid
-when it lands, and it can only land at a profit. Every trade is also
-simulated first, for free, so doomed attempts are never sent.
+Real trades go through Jito's block engine as single-transaction bundles
+(`SEND_VIA=jito`, the default). Jito documents these as revert-protected: a
+transaction that would fail is dropped instead of landing, and the tip is
+only paid when it lands. **This has not yet been observed with this bot** —
+MICRO mode exists to measure it. Even then, attempts are not free in
+practice: they spend request budget, can lose the race to faster bots, and
+the tip and fees eat into every landed trade. Every trade is simulated
+first, so attempts that would clearly fail are never sent.
 
 ## Speed and API limits
 
@@ -130,9 +135,12 @@ Only after `npm run report` says `TRY-LIVE`:
 
 1. You already have the **brand-new** bot wallet from on-chain testing
    (USDC + ~$3 of SOL for fees and refundable token-account deposits).
-2. In `.env`: `MODE=live`, `LIVE_TRADING_CONFIRM=yes`,
-   `WALLET_SECRET_KEY=<base58 secret of that wallet>`.
+2. In `.env`: `MODE=micro` (tiny real trades first), `LIVE_TRADING_CONFIRM=yes`,
+   `PRIVATE_SIGNING_KEY=<base58 secret of that wallet>`. Never a seed phrase,
+   and never paste it into any chat.
 3. Set `MAX_TRADE_USD=1` for the first run, watch a trade on solscan.io, then
    set it back to `0`.
 
-Paper mode assumes quotes fill exactly, so real results will be worse.
+Amounts are always labelled: **quoted** (quotes only — never profit),
+**simulated** (the exact transaction simulated on-chain, nothing sent) and
+**realized** (real transactions). Only simulated and realized amounts count.
