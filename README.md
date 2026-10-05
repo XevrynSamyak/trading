@@ -31,32 +31,34 @@ paper mode, and it stops on its own before losing more than you allow.
 
 ## What it does each cycle
 
-1. **Brain** (`src/brain.ts`) decides where and how to look:
-   - **which tokens**: favours tokens where it has seen gaps, sometimes
-     explores others, and every 6 hours **finds new busy, verified tokens by
-     itself** (Jupiter token list), dropping finds that prove useless
-   - **what size**: tries 25% / 50% / 100% trades per token and learns
-     which nets the most dollars (small trades move the price less)
-   - **when**: learns which hours of the day show the best gaps and scans
-     faster then; also speeds up when a gap is almost big enough and slows
-     down when nothing is close (saves the free API quota)
-   - **sudden moves**: when a token's price jumps between scans (when gaps
-     tend to open) it checks that token first and scans faster for a while
-   - **how much to trust quotes**: from on-chain tests it learns how much
-     each token's quotes overstate reality, and discounts them by that
-   - **explains itself**: `npm run report` and the daily message say, in
-     plain language, what it noticed and why it acts that way
-2. **Scanner** quotes USDC → token → USDC for each one and subtracts
-   network fees.
-3. If the expected net profit beats the bar, **executor** re-quotes and puts
-   *all legs in one transaction*, with an on-chain minimum output of
-   input + estimated costs + minimum profit. If prices moved, the whole
-   transaction reverts instead of filling at a loss. (The minimum covers the
-   USDC side; network costs are estimated in SOL, so realized profit can
-   still differ slightly from the estimate.)
-4. Results go to the **ledger**; the brain learns from them (pickier after
-   failures, looser after wins, less trust in tokens whose gaps turn out
-   fake) and saves what it learned to disk.
+1. **Safety first:** waits while the kill switch is on; checks the loss
+   guards; checks new tokens' mints on-chain (token safety).
+2. **Chooses what to quote:** tokens whose pools just changed (event
+   triggers), otherwise the brain's picks (hot or promising tokens first,
+   some exploration), and every few scans, triangles through SOL.
+3. **Scans:** quotes every leg (USDC → token → USDC, or USDC → A → B → USDC)
+   within Jupiter's request limit, always keeping room to execute at once,
+   and values each cycle after every cost. It stops at the first gap worth
+   acting on.
+4. **Decides by expected value:** net after costs × the learned chance that
+   such a gap survives, simulates OK, lands and profits (Bayesian rates per
+   token and route; LEARNING.md).
+5. **Sizes:** compares a few trade sizes with spare requests and keeps the
+   best expected value, within every cap.
+6. **Executes:** re-quotes **every leg** fresh, puts all legs in **one
+   transaction** with an on-chain minimum output (input + costs + minimum
+   profit; otherwise the whole transaction reverts), then, by mode: stops
+   there (quote-only paper), simulates it on-chain (paper with a wallet
+   address), or simulates, signs and sends it via Jito (MICRO/LIVE).
+   EXECUTION.md has the details.
+7. **Records** one funnel line per opportunity (quoted → executable →
+   simulated → submitted → landed → profitable, with timestamps) and one
+   ledger line with its basis. Both learners update from checked results
+   only.
+
+More detail: ARCHITECTURE.md (how it fits together), EXECUTION.md,
+LEARNING.md, RISK.md (modes, gate, guards, secrets), PROFITABILITY.md (what
+to expect and how to know), AUDIT.md (what V1 got wrong).
 
 ## Testing honestly before going live
 
@@ -120,11 +122,18 @@ never exceeds the limit in any 60-second window. Short bursts also seem to
 count, so it additionally keeps any 10 seconds to a sixth of the limit (minus
 one) and checks tokens one after another instead of all at once.
 
-With the free key that is ~9 full scans a minute. When a token is moving fast
-or a gap is nearly big enough, the bot switches to **focus scans** of just
-that token (2 requests), re-checking it about every 2 seconds, with a full
-scan every third time so nothing else is ignored. Wallet balances (Helius)
-are read at most once a minute to stay well inside the free RPC plan.
+Each scan also keeps enough requests free to act on a gap **at once**
+(re-quote every leg, plus build the transaction when testing on-chain or
+trading): a gap found but acted on seconds later is gone. That trades
+coverage for speed. With the free key, simulated over 10 minutes: about 8
+full scans a minute with no reserve, **about 6 in quote-only paper mode, and
+about 4 when testing on-chain or trading**. `npm run status` shows the real
+numbers.
+
+When a token is moving fast or a gap is nearly big enough, the bot switches
+to **focus scans** of just that token (2 requests), with a full scan every
+third time so nothing else is ignored. Wallet balances (Helius) are read at
+most once a minute to stay well inside the free RPC plan.
 
 ## Triangles and backtesting
 

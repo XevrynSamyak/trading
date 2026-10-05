@@ -46,7 +46,9 @@ Then check everything connects:
 npm run check
 ```
 
-Every line should say `OK` (Wallet says `SKIP` until you add one).
+Lines should say `OK` or `INFO` (Wallet says `SKIP` until you add one). It
+also lists every token's safety state. If `WebSocket` fails, event triggers
+can't work on your connection: put `EVENT_TRIGGERS=off` in `.env`.
 
 ## 4. Start it
 
@@ -67,9 +69,10 @@ chmod +x ~/.termux/boot/start-arb-bot
 
 ## 5. Scan twice as fast with a free Jupiter key (recommended)
 
-Without a key, Jupiter allows 30 price requests a minute (about 4 scans a
-minute). A free key from Jupiter's developer portal doubles that. Put it in
-`.env` yourself; never paste it into a chat or the code:
+Without a key, Jupiter allows 30 price requests a minute (about 2 full scans a
+minute, since each scan keeps room to act on a gap at once). A free key from
+Jupiter's developer portal doubles the limit, which gives about 4–6 scans a
+minute. Put it in `.env` yourself; never paste it into a chat or the code:
 
 ```bash
 echo "JUPITER_API_KEY=PASTE_YOUR_KEY_HERE" >> .env
@@ -96,6 +99,18 @@ trade on the real chain (nothing is sent, no secret key needed):
 5. Restart the bot (see "Stop it" below, then start it again).
 
 Never paste the wallet's secret key or seed phrase anywhere for this step.
+
+## 5c. Measure this phone's speed (optional)
+
+```bash
+cd ~/trading && npm run benchmark
+```
+
+It measures how long the RPC, Jupiter (both legs of a trade), Jito and the
+WebSocket take from your phone, and so how long a price gap must last for
+this bot to even confirm it. Nothing is signed or sent. Run it once while
+the bot is stopped (it shares Jupiter's request limit); `npm run report`
+then shows the numbers.
 
 ## 6. Check on it
 
