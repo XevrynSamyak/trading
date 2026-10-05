@@ -48,7 +48,7 @@ export function goLiveVerdict(i: GateInput, t: GateThresholds): Verdict {
   const sims = i.paper.filter((r) => r.simulated);
   const ok = sims.filter((r) => r.simulated!.ok);
   if (!sims.length) {
-    micro.push("no on-chain simulation data yet: set WALLET_PUBLIC_KEY to a funded wallet so paper mode tests every trade on-chain");
+    micro.push("no trades simulated on-chain yet (paper mode does this when WALLET_PUBLIC_KEY is a funded wallet and a gap is worth testing)");
   } else {
     if (sims.length < t.minSimulated) micro.push(`only ${sims.length} trades simulated on-chain (need ${t.minSimulated})`);
     const rate = ok.length / sims.length;

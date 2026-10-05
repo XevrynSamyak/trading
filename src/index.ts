@@ -764,6 +764,9 @@ async function main() {
   server?.close();
   publish({ state: "stopped", note: undefined, nextScanInMs: 0 });
   await notify("Stopped.");
+  // Exit explicitly: the RPC's WebSocket client keeps reconnecting (and the
+  // process alive) otherwise, and the phone's runner waits for a clean exit.
+  process.exit(0);
 }
 
 main().catch((err) => {

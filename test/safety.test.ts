@@ -5,7 +5,7 @@ import { Keypair } from "@solana/web3.js";
 import bs58 from "bs58";
 import { describe, expect, it } from "vitest";
 import { loadConfig } from "../src/config.js";
-import { redact } from "../src/log.js";
+import { makeRepeatFilter, redact } from "../src/log.js";
 import { checkSecrets, looksLikeSeedPhrase } from "../src/secrets.js";
 
 const kp = Keypair.generate();
@@ -82,5 +82,20 @@ describe("modes and keys in config", () => {
   it("accepts the older WALLET_SECRET_KEY name and a percentage loss floor", () => {
     expect(loadConfig({ WALLET_SECRET_KEY: secret }).signingKey).toBe(secret);
     expect(loadConfig({ STARTING_BALANCE_USD: "100", LOSS_FLOOR_PCT: "0.8" }).lossFloorUsd).toBe(80);
+  });
+});
+
+describe("WebSocket error spam", () => {
+  it("shows the first reconnect error, then at most one every quiet period", () => {
+    let t = 0;
+    const f = makeRepeatFilter(60_000, () => t);
+    expect(f("ws error: connect ECONNREFUSED")).toMatch(/^ws error: connect ECONNREFUSED \[WebSocket unreachable/);
+    t += 1_000;
+    expect(f("ws error: connect ECONNREFUSED")).toBeNull();
+    t += 1_000;
+    expect(f("ws error: connect ECONNREFUSED")).toBeNull();
+    expect(f("best SOL $20: quoted net -0.8bps")).toBe("best SOL $20: quoted net -0.8bps");
+    t += 60_000;
+    expect(f("ws error: connect ECONNREFUSED")).toMatch(/\(2 similar hidden\)/);
   });
 });

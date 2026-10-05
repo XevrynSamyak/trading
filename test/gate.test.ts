@@ -42,7 +42,7 @@ describe("go-live gate", () => {
   it("says NO to both without evidence, naming what is missing", () => {
     const v = goLiveVerdict(input({ paperDays: 0.5 }), T);
     expect(v.micro.ok).toBe(false);
-    expect(v.micro.reasons[0]).toMatch(/no on-chain simulation data yet/);
+    expect(v.micro.reasons[0]).toMatch(/no trades simulated on-chain yet/);
     expect(v.micro.reasons).toContain("only 0.5 days of paper data (need 3)");
     expect(v.live.ok).toBe(false);
     expect(v.live.reasons).toEqual(["Insufficient real execution sample: 0 MICRO trades landed (need 20)"]);

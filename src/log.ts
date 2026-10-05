@@ -64,11 +64,36 @@ let installed = false;
  * Wraps console.* so output from libraries (e.g. RPC/WebSocket errors that
  * could include the RPC URL with its API key) is redacted too.
  */
+/**
+ * The Solana library prints "ws error: ..." on every reconnect attempt (about
+ * once a second) while the RPC's WebSocket is unreachable. Show the first one,
+ * then at most one every `quietMs`, with how many were hidden.
+ */
+export function makeRepeatFilter(quietMs = 10 * 60_000, now: () => number = Date.now) {
+  let lastShown = -Infinity;
+  let hidden = 0;
+  return (line: string): string | null => {
+    if (!line.startsWith("ws error")) return line;
+    if (now() - lastShown < quietMs) {
+      hidden += 1;
+      return null;
+    }
+    lastShown = now();
+    const note = hidden ? ` (${hidden} similar hidden)` : "";
+    hidden = 0;
+    return `${line}${note} [WebSocket unreachable; retrying quietly. Event triggers pause until it's back]`;
+  };
+}
+
 export function installConsoleRedaction(): void {
   if (installed) return;
   installed = true;
+  const filter = makeRepeatFilter();
   for (const level of ["log", "info", "warn", "error", "debug"] as const) {
     const original = console[level].bind(console);
-    console[level] = (...args: unknown[]) => original(fmt(args));
+    console[level] = (...args: unknown[]) => {
+      const line = filter(fmt(args));
+      if (line !== null) original(line);
+    };
   }
 }
