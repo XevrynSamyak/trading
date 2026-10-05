@@ -153,6 +153,12 @@ export interface Config {
   jupiterTokensApi: string;
   maxTokens: number;
   minTokenLiquidityUsd: number;
+  /** Token safety for discovered tokens (see tokensafety.ts). */
+  minTokenHolders: number;
+  minPoolAgeDays: number;
+  maxTopHoldersPct: number;
+  /** Discovered tokens allowed to trade real money (symbols or mints). Configured tokens always are. */
+  liveTokens: string[];
   telegramBotToken?: string;
   telegramChatId?: string;
   dataDir: string;
@@ -253,6 +259,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     jupiterTokensApi: jupiterUrl(env.JUPITER_TOKENS_API, "/tokens/v2", jupiterApiKey),
     maxTokens: num(env, "MAX_TOKENS", 12),
     minTokenLiquidityUsd: num(env, "MIN_TOKEN_LIQUIDITY_USD", 1_000_000),
+    minTokenHolders: num(env, "MIN_TOKEN_HOLDERS", 1_000),
+    minPoolAgeDays: num(env, "MIN_POOL_AGE_DAYS", 7),
+    maxTopHoldersPct: num(env, "MAX_TOP_HOLDERS_PCT", 60),
+    liveTokens: (env.LIVE_TOKENS ?? "")
+      .split(",")
+      .map((x) => x.trim())
+      .filter(Boolean),
     telegramBotToken: env.TELEGRAM_BOT_TOKEN || undefined,
     telegramChatId: env.TELEGRAM_CHAT_ID || undefined,
     dataDir: env.DATA_DIR || "./data",
@@ -298,5 +311,15 @@ export function costSettings(cfg: Config): import("./costs.js").CostSettings {
     maxTipLamports: cfg.jitoMaxTipLamports,
     safetyBufferBps: cfg.safetyBufferBps,
     safetyBufferUsd: cfg.safetyBufferUsd,
+  };
+}
+
+/** Thresholds the token safety check applies to discovered tokens. */
+export function safetyThresholds(cfg: Config): import("./tokensafety.js").SafetyThresholds {
+  return {
+    minLiquidityUsd: cfg.minTokenLiquidityUsd,
+    minHolders: cfg.minTokenHolders,
+    minPoolAgeDays: cfg.minPoolAgeDays,
+    maxTopHoldersPct: cfg.maxTopHoldersPct,
   };
 }

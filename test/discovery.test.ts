@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { USDC_MINT } from "../src/config.js";
-import { discoverTokens, parseTopTokens } from "../src/discovery.js";
+import { discoverTokens, parseTokenFacts, parseTopTokens } from "../src/discovery.js";
 
 const opts = { minLiquidityUsd: 1_000_000, limit: 10 };
 
@@ -18,6 +18,18 @@ describe("token discovery", () => {
       opts,
     );
     expect(found).toEqual({ GOOD: "good-mint", TAG: "tag-mint", "GOOD-dupe": "dupe-mint" });
+  });
+
+  it("keeps the market facts the safety check needs, leaving unknown ones unset", () => {
+    const facts = parseTokenFacts([
+      {
+        id: "m1", symbol: "A", liquidity: 2_000_000, holderCount: 5400, isVerified: true,
+        firstPool: { createdAt: "2026-09-01T00:00:00Z" }, audit: { topHoldersPercentage: 23.5 },
+      },
+      { id: "m2", symbol: "B" },
+    ]);
+    expect(facts.m1).toEqual({ liquidityUsd: 2_000_000, holders: 5400, poolCreatedAt: Date.parse("2026-09-01T00:00:00Z"), topHoldersPct: 23.5, verified: true });
+    expect(facts.m2).toEqual({ liquidityUsd: undefined, holders: undefined, poolCreatedAt: undefined, topHoldersPct: undefined, verified: false });
   });
 
   it("returns nothing for an unexpected response", () => {

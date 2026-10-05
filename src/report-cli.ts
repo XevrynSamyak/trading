@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { readJsonWithBackup } from "./atomic.js";
 import { Brain } from "./brain.js";
-import { loadConfig, type Config, type Mode } from "./config.js";
+import { loadConfig, safetyThresholds, type Config, type Mode } from "./config.js";
 import { gateThresholds, goLiveVerdict, loadGateInput } from "./gate.js";
 import { Funnel } from "./funnel.js";
 import { Ledger, basisOf, moneyBasis, startOfUtcDay, startOfUtcMonth, totalsByBasis } from "./ledger.js";
@@ -9,6 +9,7 @@ import { renderReport, riskStatus, type ReportData } from "./report.js";
 import { LearningStats } from "./stats.js";
 import { readStatus } from "./status-file.js";
 import { formatVerdict, monthVerdict } from "./sustain.js";
+import { TokenSafety } from "./tokensafety.js";
 
 /**
  * `npm run report`: quoted, executable, simulated and realized results kept
@@ -50,6 +51,7 @@ export function buildReportData(cfg: Config, now = Date.now()): ReportData & { b
     (money === "realized" ? "real money)" : "simulated on-chain only; NOT real money)");
 
   const brain = new Brain(file(`brain-${cfg.mode}.json`), { baseMinProfitBps: cfg.minProfitBps });
+  const safety = new TokenSafety(file("token-safety.json"), { liveTokens: cfg.liveTokens, thresholds: safetyThresholds(cfg) });
   return {
     modeNow: cfg.mode,
     scans,
@@ -60,6 +62,10 @@ export function buildReportData(cfg: Config, now = Date.now()): ReportData & { b
     risk,
     thoughts: brain.thoughts(cfg.minProfitBps),
     billsLine,
+    safety: Object.entries(brain.tokenPool(cfg.tokens)).map(([symbol, mint]) => ({
+      symbol,
+      ...safety.verdict(symbol, mint, symbol in cfg.tokens, now),
+    })),
     brainSummary: brain.summary(),
   };
 }

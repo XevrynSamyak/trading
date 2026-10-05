@@ -9,9 +9,11 @@ import {
   jupiterRateWindows,
   loadConfig,
   maxScansPerMin,
+  safetyThresholds,
   tradeSizeUsd,
 } from "./config.js";
 import { discoverTokens } from "./discovery.js";
+import { timeoutFetch } from "./http.js";
 import { gateThresholds, goLiveVerdict, loadGateInput } from "./gate.js";
 import { HALT_FILE, disableTrading, tradingDisabled } from "./killswitch.js";
 import { Funnel, STAGES, buildOppRecord } from "./funnel.js";
@@ -29,6 +31,7 @@ import { makeNotifier } from "./notify.js";
 import { usdToUsdcAtoms } from "./profit.js";
 import { RiskManager } from "./risk.js";
 import { checkSecrets } from "./secrets.js";
+import { TokenSafety, canAct, canScan, type SafetyState } from "./tokensafety.js";
 import { fetchSolPriceUsd, scanCycles, type Scored } from "./scanner.js";
 import { writeStatus, type LiveStatus } from "./status-file.js";
 import { formatVerdict, monthVerdict, shouldRetire } from "./sustain.js";
@@ -75,7 +78,8 @@ async function main() {
     log.error("Refusing to start until the settings above are fixed.");
     process.exit(EXIT_REFUSED);
   }
-  const notify = makeNotifier(cfg);
+  const httpFetch = timeoutFetch();
+  const notify = makeNotifier(cfg, httpFetch);
   const haltFile = join(cfg.dataDir, HALT_FILE);
   if (existsSync(haltFile)) {
     log.error(`Bot is halted (${haltFile}). Read it, then delete it to restart.`);
@@ -103,16 +107,16 @@ async function main() {
   // Every Jupiter request goes through one counter covering a 60s and a 10s window, and the
   // bot waits for room before each request group, so it never bursts over Jupiter's limits.
   const budget = new RequestBudget(jupiterRateWindows(cfg.jupiterRpm));
-  const jupFetch = budgetedFetch(budget);
+  const jupFetch = budgetedFetch(budget, httpFetch);
   const jup = new JupiterClient(cfg.jupiterApi, jupFetch, cfg.jupiterApiKey);
-  const conn = new Connection(cfg.rpcUrl, "confirmed");
+  const conn = new Connection(cfg.rpcUrl, { commitment: "confirmed", fetch: httpFetch });
   // Only real-money modes ever hold a signer. Paper mode only needs the public address.
   const wallet: Keypair | undefined = isRealMoney(cfg.mode) && cfg.signingKey ? loadKeypair(cfg.signingKey) : undefined;
   const owner =
     wallet?.publicKey ??
     (cfg.walletPublicKey ? new PublicKey(cfg.walletPublicKey) : cfg.signingKey ? loadKeypair(cfg.signingKey).publicKey : undefined);
   const money: Basis = moneyBasis(cfg.mode);
-  const jito = cfg.sendVia === "jito" ? new JitoClient(cfg.jitoUrl) : undefined;
+  const jito = cfg.sendVia === "jito" ? new JitoClient(cfg.jitoUrl, httpFetch) : undefined;
   const ledger = new Ledger(join(cfg.dataDir, `trades-${cfg.mode}.jsonl`));
   const brain = new Brain(join(cfg.dataDir, `brain-${cfg.mode}.json`), {
     baseMinProfitBps: cfg.minProfitBps,
@@ -136,6 +140,12 @@ async function main() {
     return LearningStats.fromRecords(past, { ...DEFAULT_PRIORS, landing: cfg.landingPrior });
   })(Funnel.read(funnelPath));
   const risk = new RiskManager(cfg);
+  // Token safety: what each token's mint allows (fees, hooks, freezes...) and how healthy its market is.
+  const safety = new TokenSafety(join(cfg.dataDir, "token-safety.json"), {
+    liveTokens: cfg.liveTokens,
+    thresholds: safetyThresholds(cfg),
+  });
+  const lastSafety = new Map<string, SafetyState>();
   // Older versions let quote-only paper wins lower the profit bar. Without any
   // result checked on-chain, there is no real evidence for that: undo it.
   if (brain.restoredFromBackup) log.warn("brain file was unreadable; restored what it learned from the backup copy");
@@ -269,7 +279,14 @@ async function main() {
             jupFetch,
             cfg.jupiterApiKey,
           );
-          const added = brain.learnTokens(found, cfg.tokens, cfg.maxTokens);
+          for (const [sym, mint] of Object.entries(found.tokens)) {
+            if (found.facts[mint]) safety.noteMarket(mint, sym, found.facts[mint]);
+          }
+          // Skip tokens already known to be blocked; new ones are checked before their first quote.
+          const candidates = Object.fromEntries(
+            Object.entries(found.tokens).filter(([sym, mint]) => safety.verdict(sym, mint, false, now).state !== "BLOCKED"),
+          );
+          const added = brain.learnTokens(candidates, cfg.tokens, cfg.maxTokens);
           if (added.length) log.event(`brain found new tokens to watch: ${added.join(", ")}`);
         } catch (err) {
           log.warn(`token discovery failed (keeps current list): ${String(err).slice(0, 120)}`);
@@ -349,7 +366,34 @@ async function main() {
         continue;
       }
 
-      const tokens = brain.pickTokens(brain.tokenPool(cfg.tokens));
+      // Check new tokens' mints (and every token's, daily) before quoting them.
+      const pool = brain.tokenPool(cfg.tokens);
+      if (safety.due(Object.values(pool), now).length) {
+        try {
+          await safety.refresh(conn, pool, now);
+        } catch (err) {
+          log.warn(`token safety check failed (unchecked tokens stay paper-only; retrying later): ${String(err).slice(0, 120)}`);
+        }
+      }
+      const safetyOf = (sym: string, mint: string) => safety.verdict(sym, mint, sym in cfg.tokens, now);
+      for (const [sym, mint] of Object.entries(pool)) {
+        const v = safetyOf(sym, mint);
+        if (lastSafety.get(mint) !== v.state) {
+          lastSafety.set(mint, v.state);
+          if (v.state !== "LIVE_ALLOWED" || v.reasons.length) log.event(`token safety: ${sym} is ${v.state} (${v.reasons.join("; ")})`);
+        }
+        // A blocked discovered token would never be quoted, so the brain would never drop it.
+        if (v.state === "BLOCKED" && brain.forgetToken(sym)) log.event(`brain dropped ${sym}: blocked by the safety check`);
+      }
+      const scannable = Object.fromEntries(Object.entries(pool).filter(([sym, mint]) => canScan(safetyOf(sym, mint).state, cfg.mode)));
+      if (!Object.keys(scannable).length) {
+        const why = isRealMoney(cfg.mode) ? "no token is LIVE_ALLOWED yet (safety check pending or failed)" : "every token is blocked";
+        publish({ state: "waiting", note: why, nextScanInMs: cfg.scanIntervalMs * 4 });
+        log.warn(why);
+        await sleep(cfg.scanIntervalMs * 4);
+        continue;
+      }
+      const tokens = brain.pickTokens(scannable);
       scanTimes.push(Date.now());
       const specs: CycleSpec[] = Object.entries(tokens).map(([sym, mint]) => twoLegSpec(sym, mint));
       const buckets: Record<string, SizeBucket> = {};
@@ -375,7 +419,11 @@ async function main() {
         });
         return { p, ev, score };
       };
+      // Every token the cycle passes through must allow acting in this mode.
+      const safeToAct = (x: Scored) =>
+        x.cycle.tokens.every((sym, i) => canAct(safetyOf(sym, x.cycle.path[i + 1]).state, cfg.mode));
       const worthActing = (x: Scored, ev: number) =>
+        safeToAct(x) &&
         brain.shouldAttempt(x.cycle.symbol, x.val.netBps) &&
         ev >= cfg.minExpectedProfitUsd &&
         x.cycle.priceImpactBps <= cfg.maxPriceImpactBps;

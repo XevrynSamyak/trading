@@ -82,6 +82,24 @@ paper profits as evidence:
 
 Each "NO" lists its reasons, e.g. `Insufficient real execution sample`.
 
+## Token safety
+
+Before quoting a token, the bot reads its mint on-chain (one batched call,
+re-checked daily, cached in `data/token-safety.json`) and gives it a state:
+
+- **BLOCKED** (never quoted): transfer fees, transfer hooks, a permanent
+  delegate, accounts frozen by default, paused or non-transferable tokens:
+  anything that makes a swap behave differently from its quote.
+- **WATCH** (quoted to learn, never traded): a *discovered* token whose issuer
+  can freeze accounts or mint more, or with thin liquidity, few holders, a
+  pool younger than a week, or ownership concentrated in a few wallets.
+- **PAPER_ONLY**: other discovered tokens. Real trades need them listed in
+  `LIVE_TOKENS`.
+- **LIVE_ALLOWED**: your configured tokens (after the on-chain check) and
+  allowlisted ones. MICRO and LIVE only quote and trade these.
+
+`npm run report` lists every token's state and why.
+
 ## Live trading through Jito
 
 Real trades go through Jito's block engine as single-transaction bundles

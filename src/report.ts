@@ -3,6 +3,7 @@ import { STAGES, type OppRecord } from "./funnel.js";
 import type { Verdict } from "./gate.js";
 import type { LearningStats } from "./stats.js";
 import { sizeBucket } from "./stats.js";
+import type { SafetyState } from "./tokensafety.js";
 
 /**
  * `npm run report`: what actually happened, with quoted, executable,
@@ -19,6 +20,8 @@ export interface ReportData {
   risk: { level: "GREEN" | "AMBER" | "RED"; reasons: string[] };
   thoughts: string[];
   billsLine: string;
+  /** Safety state of every token the bot knows. */
+  safety?: { symbol: string; state: SafetyState; reasons: string[] }[];
 }
 
 const median = (xs: number[]) => {
@@ -124,6 +127,15 @@ export function renderReport(d: ReportData): string {
       );
     }
     out.push("  (* = simulated on-chain, no real trades yet)");
+    out.push("");
+  }
+
+  if (d.safety?.length) {
+    out.push("Token safety                  (BLOCKED: never quoted, WATCH: quoted only, PAPER_ONLY, LIVE_ALLOWED)");
+    const order: SafetyState[] = ["BLOCKED", "WATCH", "PAPER_ONLY", "LIVE_ALLOWED"];
+    for (const t of [...d.safety].sort((a, b) => order.indexOf(a.state) - order.indexOf(b.state) || a.symbol.localeCompare(b.symbol))) {
+      out.push(`  ${t.symbol.padEnd(10)} ${t.state.padEnd(13)} ${t.reasons.join("; ")}`.trimEnd());
+    }
     out.push("");
   }
 

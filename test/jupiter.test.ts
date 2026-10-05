@@ -35,3 +35,21 @@ describe("Jupiter API key", () => {
     expect(calls[0].headers).not.toHaveProperty("x-api-key");
   });
 });
+
+describe("request timeouts", () => {
+  it("gives up on a hung request instead of stalling the bot", async () => {
+    const { timeoutFetch } = await import("../src/http.js");
+    const hang = ((_url: string, init?: RequestInit) =>
+      new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal!.reason));
+      })) as typeof fetch;
+    const started = Date.now();
+    await expect(timeoutFetch(50, hang)("https://x")).rejects.toThrow(/timeout|aborted/i);
+    expect(Date.now() - started).toBeLessThan(2_000);
+    // A caller's own abort still works.
+    const ctl = new AbortController();
+    const p = timeoutFetch(10_000, hang)("https://x", { signal: ctl.signal });
+    ctl.abort(new Error("stop now"));
+    await expect(p).rejects.toThrow(/stop now/);
+  });
+});

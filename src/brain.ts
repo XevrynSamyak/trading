@@ -217,6 +217,13 @@ export class Brain {
 
   // ---- which tokens -------------------------------------------------------
 
+  /** Drops a discovered token (e.g. one the safety check blocked). Returns true if it was there. */
+  forgetToken(symbol: string): boolean {
+    if (!(symbol in this.state.discovered)) return false;
+    delete this.state.discovered[symbol];
+    return true;
+  }
+
   /** Configured tokens plus the ones it discovered by itself. */
   tokenPool(configured: Record<string, string>): Record<string, string> {
     return { ...this.state.discovered, ...configured };

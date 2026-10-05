@@ -1,5 +1,6 @@
 import { Connection, PublicKey } from "@solana/web3.js";
 import { isRealMoney, loadConfig, maxScansPerMin } from "./config.js";
+import { timeoutFetch } from "./http.js";
 import { installConsoleRedaction } from "./log.js";
 import { checkSecrets } from "./secrets.js";
 import { JitoClient } from "./jito.js";
@@ -38,8 +39,9 @@ async function main() {
   for (const w of secrets.warnings) console.log(`WARN  Settings: ${w}`);
   if (!secrets.errors.length) console.log("OK    Settings: no secrets in the wrong place");
 
-  const conn = new Connection(cfg.rpcUrl, "confirmed");
-  const jup = new JupiterClient(cfg.jupiterApi, fetch, cfg.jupiterApiKey);
+  const httpFetch = timeoutFetch();
+  const conn = new Connection(cfg.rpcUrl, { commitment: "confirmed", fetch: httpFetch });
+  const jup = new JupiterClient(cfg.jupiterApi, httpFetch, cfg.jupiterApiKey);
   let solPrice = 0;
 
   const results = [
@@ -96,7 +98,7 @@ async function main() {
 
   if (isRealMoney(cfg.mode) && cfg.sendVia === "jito") {
     results.push(
-      await step("Jito", async () => `${(await new JitoClient(cfg.jitoUrl).getTipAccounts()).length} tip accounts`),
+      await step("Jito", async () => `${(await new JitoClient(cfg.jitoUrl, httpFetch).getTipAccounts()).length} tip accounts`),
     );
   }
 
