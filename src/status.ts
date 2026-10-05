@@ -1,4 +1,5 @@
-import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { tailLines } from "./tail.js";
 import { join } from "node:path";
 import { Brain, EDGE_BINS } from "./brain.js";
 import { loadConfig } from "./config.js";
@@ -112,6 +113,22 @@ export function renderStatus(i: StatusInput): string {
     if (live.focus?.length) {
       out.push(`Focus:   ${yellow(live.focus.join(", "))} ${dim("(re-checking just this every few seconds)")}`);
     }
+    if (live.funnelToday && Object.keys(live.funnelToday).length) {
+      const f = live.funnelToday;
+      out.push(
+        `Funnel:  ${["quoted", "executable", "simulated", "submitted", "landed", "profitable"]
+          .map((s) => `${s} ${f[s] ?? 0}`)
+          .join(" → ")} ${dim("(today)")}`,
+      );
+    }
+    if (live.lastOpp) {
+      const o = live.lastOpp;
+      out.push(
+        `Latest:  ${o.id} ${o.symbol} quoted ${o.quotedBps.toFixed(1)}bps` +
+          (o.execBps !== undefined ? ` → fresh ${o.execBps.toFixed(1)}bps` : "") +
+          ` → ${o.result} at "${o.stage}" ${dim(`(${o.totalMs} ms)`)}`,
+      );
+    }
     if (live.hot.length) out.push(`Hot:     ${yellow(live.hot.join(", "))} ${dim("(sudden price moves)")}`);
     out.push(
       `Wallet:  $${live.walletValueUsd.toFixed(2)}${live.mode === "paper" ? dim(" (paper)") : ""}   ` +
@@ -176,20 +193,7 @@ export function renderStatus(i: StatusInput): string {
   return out.join("\n");
 }
 
-/** Last lines of a possibly large log file, reading only its end. */
-export function tailLines(path: string, maxLines: number, maxBytes = 64 * 1024): string[] {
-  if (!existsSync(path)) return [];
-  const size = statSync(path).size;
-  const start = Math.max(0, size - maxBytes);
-  const buf = Buffer.alloc(size - start);
-  const fd = openSync(path, "r");
-  try {
-    readSync(fd, buf, 0, buf.length, start);
-  } finally {
-    closeSync(fd);
-  }
-  return buf.toString("utf8").split("\n").filter(Boolean).slice(-maxLines);
-}
+export { tailLines } from "./tail.js";
 
 function isAlive(pid: number | undefined): boolean {
   if (!pid) return false;

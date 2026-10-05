@@ -108,6 +108,12 @@ export interface Config {
   maxSlippageBps: number;
   /** Give up waiting for a landing after this long; an unknown outcome trips the kill switch. */
   landingTimeoutMs: number;
+  /** Only act when expected value (net × probability of success) is at least this. */
+  minExpectedProfitUsd: number;
+  /** Assumed landing chance until real trades provide data. */
+  landingPrior: number;
+  /** Reject sizes whose quoted price impact exceeds this (bps). */
+  maxPriceImpactBps: number;
   tokens: Record<string, string>;
   /** Fraction of the wallet's USDC used per trade; trades grow as the wallet grows. */
   tradeSizePct: number;
@@ -194,6 +200,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     safetyBufferUsd: num(env, "SAFETY_BUFFER_USD", 0.001),
     maxSlippageBps: num(env, "MAX_SLIPPAGE_BPS", 100),
     landingTimeoutMs: num(env, "LANDING_TIMEOUT_MS", 120_000),
+    minExpectedProfitUsd: num(env, "MIN_EXPECTED_PROFIT_USD", 0.001),
+    landingPrior: num(env, "LANDING_PRIOR", 0.5),
+    maxPriceImpactBps: num(env, "MAX_PRICE_IMPACT_BPS", 100),
     tokens,
     tradeSizePct: num(env, "TRADE_SIZE_PCT", 0.8),
     maxTradeUsd: num(env, "MAX_TRADE_USD", 0),

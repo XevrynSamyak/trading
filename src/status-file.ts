@@ -27,6 +27,10 @@ export interface LiveStatus {
   jupiterUsed?: number;
   jupiterLimit?: number;
   scansLastMin?: number;
+  /** Opportunities acted on today, by the furthest funnel stage reached. */
+  funnelToday?: Record<string, number>;
+  /** The most recent opportunity the bot acted on. */
+  lastOpp?: { id: string; symbol: string; stage: string; result: string; totalMs: number; quotedBps: number; execBps?: number };
 }
 
 export function writeStatus(path: string, status: LiveStatus): void {

@@ -12,6 +12,8 @@ import {
   tradeSizeUsd,
 } from "./config.js";
 import { discoverTokens } from "./discovery.js";
+import { Funnel, STAGES, buildOppRecord } from "./funnel.js";
+import { DEFAULT_PRIORS, LearningStats, scoreOpportunity } from "./stats.js";
 import { costSettings as makeCostSettings } from "./config.js";
 import { twoLegSpec, type CycleSpec } from "./cycle.js";
 import { liveExecute, quoteOnlyExecute, simulateExecute, type ExecResult } from "./executor.js";
@@ -84,6 +86,18 @@ async function main() {
     tokensPerCycle: TOKENS_PER_SCAN,
   });
   const balanceCache = owner ? new BalanceCache(conn, owner) : undefined;
+  // The opportunity funnel is the source of truth for learning; replay it at startup.
+  const funnelPath = join(cfg.dataDir, `opps-${cfg.mode}.jsonl`);
+  const funnel = new Funnel(funnelPath);
+  const pastOpps = Funnel.read(funnelPath);
+  const learn = LearningStats.fromRecords(pastOpps, { ...DEFAULT_PRIORS, landing: cfg.landingPrior });
+  // Today's funnel counts for the status screen: how many reached at least each stage.
+  const funnelToday: Record<string, number> = {};
+  let funnelDay = startOfUtcDay(Date.now());
+  const countStage = (o: import("./funnel.js").OppRecord) => {
+    for (const st of STAGES.slice(0, STAGES.indexOf(o.stage) + 1)) funnelToday[st] = (funnelToday[st] ?? 0) + 1;
+  };
+  for (const o of pastOpps) if (o.ts >= funnelDay) countStage(o);
   const risk = new RiskManager(cfg);
   // Older versions let quote-only paper wins lower the profit bar. Without any
   // result checked on-chain, there is no real evidence for that: undo it.
@@ -133,6 +147,7 @@ async function main() {
   let lastDay = startOfUtcDay(Date.now());
   let lastMonth = startOfUtcMonth(Date.now());
   let warnedUnfunded = false;
+  let lastOpp: import("./funnel.js").OppRecord | undefined;
 
   // Live progress for `npm run status`.
   const statusPath = join(cfg.dataDir, "status.json");
@@ -317,20 +332,43 @@ async function main() {
       }
       if (scored[0]) brain.observeCycle(scored[0].val.netBps, scored[0].cycle.symbol);
 
-      // Rank by what the brain expects really to happen, not the raw quote.
+      // Rank by expected value (net × learned chance of success), discounted for stale
+      // quotes, slow execution, price impact and unproven tokens — not by the raw quote.
+      const withWallet = !!simulateAs || isRealMoney(cfg.mode);
+      const decisionTs = Date.now();
+      const rank = (x: Scored) => {
+        const p = learn.probabilities(x.cycle.symbol, x.cycle.routes, cfg.mode, withWallet);
+        const ev = learn.expectedValue(x.val.netUsd, x.val.costs.networkUsd, p, cfg.mode, withWallet);
+        const score = scoreOpportunity({
+          evUsd: ev,
+          quoteAgeMs: decisionTs - x.cycle.quotedAt,
+          expectedLatencyMs: learn.medianishLatencyMs(),
+          priceImpactBps: x.cycle.priceImpactBps,
+          maxImpactBps: cfg.maxPriceImpactBps,
+          discovered: x.cycle.tokens.some((t) => !(t in cfg.tokens)),
+        });
+        return { p, ev, score };
+      };
+      const ranked = scored.map((x) => ({ ...x, ...rank(x) })).sort((a, b) => b.score - a.score);
       const expected = (x: Scored) => brain.expectedNetBps(x.cycle.symbol, x.val.netBps);
-      const best = [...scored].sort((a, b) => expected(b) - expected(a))[0];
+      const best = ranked[0];
       if (best) {
         const exp = expected(best);
         log.info(
           `best ${best.cycle.symbol} $${best.val.inUsd.toFixed(2)}: quoted net ${best.val.netBps.toFixed(1)}bps ` +
             (Math.abs(exp - best.val.netBps) >= 0.1 ? `(expect ${exp.toFixed(1)}) ` : "") +
             `($${best.val.netUsd.toFixed(4)} after $${best.val.costs.totalUsd.toFixed(4)} costs) ` +
-            `need ${brain.minProfitBps}bps [${best.cycle.routes}]`,
+            `need ${brain.minProfitBps}bps, EV $${best.ev.toFixed(4)} (P=${(best.p.success * 100).toFixed(0)}%) ` +
+            `[${best.cycle.routes}]`,
         );
       }
 
-      if (best && brain.shouldAttempt(best.cycle.symbol, best.val.netBps)) {
+      if (
+        best &&
+        brain.shouldAttempt(best.cycle.symbol, best.val.netBps) &&
+        best.ev >= cfg.minExpectedProfitUsd &&
+        best.cycle.priceImpactBps <= cfg.maxPriceImpactBps
+      ) {
         const { cycle, val } = best;
         const deps = {
           conn,
@@ -350,6 +388,24 @@ async function main() {
         else result = await quoteOnlyExecute(cycle, val, deps);
 
         const basis: Basis = isRealMoney(cfg.mode) ? "realized" : result.verified ? "simulated" : "quoted";
+        const opp = buildOppRecord({
+          id: funnel.nextId(decisionTs),
+          mode: cfg.mode,
+          cycle,
+          val,
+          result,
+          decisionTs,
+          expected: { pSuccess: best.p.success, evUsd: best.ev, assumed: best.p.assumed },
+          solPriceUsd: solPrice,
+        });
+        funnel.record(opp);
+        learn.observe(opp);
+        lastOpp = opp;
+        if (startOfUtcDay(opp.ts) !== funnelDay) {
+          funnelDay = startOfUtcDay(opp.ts);
+          for (const k of Object.keys(funnelToday)) delete funnelToday[k];
+        }
+        countStage(opp);
         ledger.append({
           ts: Date.now(),
           mode: cfg.mode,
@@ -362,6 +418,7 @@ async function main() {
           reason: result.reason,
           verified: result.verified,
           basis,
+          opportunityId: opp.id,
         });
         brain.observeTrade(cycle.symbol, result.status, result.netUsd, result.verified === true);
         // A landed trade moved real money: read fresh balances next cycle.
@@ -384,7 +441,7 @@ async function main() {
               : "QUOTE-ONLY (not real profit)";
         const exec = result.executable ? ` | fresh re-quote ${result.executable.netBps.toFixed(1)}bps` : "";
         const line =
-          `${label} ${cycle.symbol} $${val.inUsd.toFixed(2)}: ${basis} net $${result.netUsd.toFixed(4)}${exec}` +
+          `${opp.id} ${label} ${cycle.symbol} $${val.inUsd.toFixed(2)}: ${basis} net $${result.netUsd.toFixed(4)}${exec}` +
           (result.signature ? ` https://solscan.io/tx/${result.signature}` : "") +
           (result.reason ? ` (${result.reason})` : "");
         if (result.status === "filled" || result.status === "failed") await notify(line);
@@ -407,6 +464,16 @@ async function main() {
         jupiterUsed: budget.used(),
         jupiterLimit: cfg.jupiterRpm,
         scansLastMin: scansInLastMinute(),
+        funnelToday: { ...funnelToday },
+        lastOpp: lastOpp && {
+          id: lastOpp.id,
+          symbol: lastOpp.symbol,
+          stage: lastOpp.stage,
+          result: lastOpp.result,
+          totalMs: lastOpp.lat.totalMs,
+          quotedBps: lastOpp.quoted.netBps,
+          execBps: lastOpp.executable?.netBps,
+        },
         nextScanInMs: nextWaitMs,
         lastBest: best && {
           symbol: best.cycle.symbol,
