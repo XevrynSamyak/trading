@@ -6,7 +6,7 @@ import { FunnelReader } from "./funnel.js";
 import { gateThresholds, goLiveVerdict, loadGateInput, type Verdict } from "./gate.js";
 import { halted, tradingDisabled } from "./killswitch.js";
 import { Ledger, startOfUtcDay, totalsByBasis, type Basis, type TradeRecord } from "./ledger.js";
-import { readStatus, type LiveStatus } from "./status-file.js";
+import { isAlive, readStatus, type LiveStatus } from "./status-file.js";
 
 /**
  * `npm run status`        one-time progress screen
@@ -118,8 +118,17 @@ export function renderStatus(i: StatusInput): string {
           ? `${live.scansLastMin} scans so far (started ${duration(upMs)} ago)`
           : `${live.scansLastMin} scans in the last minute`;
       out.push(`Speed:   ${scans}  ` + dim(`(Jupiter: ${live.jupiterUsed ?? 0}/${live.jupiterLimit} requests used per minute)`));
+      if (live.quoteMs !== undefined) out.push(dim(`         quoting both legs of a token takes ~${live.quoteMs} ms from here`));
     } else if (live.paceFloorMs) {
       out.push(`Speed:   ~${(60_000 / live.paceFloorMs).toFixed(1)} scans/min`);
+    }
+    if (live.events) {
+      const e = live.events;
+      out.push(
+        `Events:  ${e.capped ? yellow("paused for today (daily cap reached)") : `watching ${e.watching} pool(s)`}, ` +
+          `${e.eventsToday.toLocaleString("en-US")} / ${e.cap.toLocaleString("en-US")} updates today` +
+          (e.tooBusy ? dim(`  (${e.tooBusy} too-busy pool(s) resting)`) : ""),
+      );
     }
     if (live.focus?.length) {
       out.push(`Focus:   ${yellow(live.focus.join(", "))} ${dim("(re-checking just this every few seconds)")}`);
@@ -211,15 +220,6 @@ export function renderStatus(i: StatusInput): string {
 
 export { tailLines } from "./tail.js";
 
-function isAlive(pid: number | undefined): boolean {
-  if (!pid) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return (err as NodeJS.ErrnoException).code === "EPERM";
-  }
-}
 
 // Funnel files only grow; when refreshing, parse just the new lines.
 const readers = new Map<string, FunnelReader>();

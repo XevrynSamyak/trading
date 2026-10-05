@@ -81,6 +81,8 @@ function jupiterUrl(configured: string | undefined, fallbackPath: string, apiKey
 export interface Config {
   mode: Mode;
   rpcUrl: string;
+  /** WebSocket endpoint, if the provider's isn't the RPC URL with wss:// (or port + 1). */
+  rpcWsUrl?: string;
   jupiterApi: string;
   /** Free key from Jupiter's developer portal: doubles the request limit. */
   jupiterApiKey?: string;
@@ -159,6 +161,13 @@ export interface Config {
   maxTopHoldersPct: number;
   /** Discovered tokens allowed to trade real money (symbols or mints). Configured tokens always are. */
   liveTokens: string[];
+  /** Re-quote a token as soon as a pool its route uses changes (RPC WebSocket). */
+  eventTriggers: boolean;
+  maxWatchedPools: number;
+  eventDailyCap: number;
+  eventDebounceMs: number;
+  /** Pools changing more often than this per minute carry no signal and are dropped for an hour. */
+  busyPoolPerMin: number;
   telegramBotToken?: string;
   telegramChatId?: string;
   dataDir: string;
@@ -205,6 +214,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const cfg: Config = {
     mode,
     rpcUrl: env.RPC_URL || "https://api.mainnet-beta.solana.com",
+    rpcWsUrl: env.RPC_WS_URL || undefined,
     jupiterApi: jupiterUrl(env.JUPITER_API, "/swap/v1", jupiterApiKey),
     jupiterApiKey,
     jupiterRpm,
@@ -266,6 +276,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       .split(",")
       .map((x) => x.trim())
       .filter(Boolean),
+    eventTriggers: env.EVENT_TRIGGERS !== "off",
+    maxWatchedPools: num(env, "MAX_WATCHED_POOLS", 4),
+    eventDailyCap: num(env, "EVENT_DAILY_CAP", 20_000),
+    eventDebounceMs: num(env, "EVENT_DEBOUNCE_MS", 1_500),
+    busyPoolPerMin: num(env, "BUSY_POOL_EVENTS_PER_MIN", 30),
     telegramBotToken: env.TELEGRAM_BOT_TOKEN || undefined,
     telegramChatId: env.TELEGRAM_CHAT_ID || undefined,
     dataDir: env.DATA_DIR || "./data",

@@ -3,6 +3,7 @@ import { STAGES, type OppRecord } from "./funnel.js";
 import type { Verdict } from "./gate.js";
 import type { LearningStats } from "./stats.js";
 import { sizeBucket } from "./stats.js";
+import type { BenchResult } from "./benchmark.js";
 import type { SafetyState } from "./tokensafety.js";
 
 /**
@@ -22,6 +23,8 @@ export interface ReportData {
   billsLine: string;
   /** Safety state of every token the bot knows. */
   safety?: { symbol: string; state: SafetyState; reasons: string[] }[];
+  /** Last `npm run benchmark` from this device. */
+  benchmark?: BenchResult;
 }
 
 const median = (xs: number[]) => {
@@ -105,6 +108,23 @@ export function renderReport(d: ReportData): string {
   lrow("decision -> submission:", fmtMs(opt(real.map((r) => r.lat.decisionToSubmitMs))));
   lrow("submission -> landing:", fmtMs(opt(real.map((r) => r.lat.submitToLandingMs))));
   lrow("total (avg / median):", `${fmtMs(avg(o.map((r) => r.lat.totalMs)))} / ${fmtMs(median(o.map((r) => r.lat.totalMs)))}`);
+  // Did pool-event triggers find gaps that were still there more often than plain polling?
+  const evented = o.filter((r) => r.t.market !== undefined);
+  if (evented.length) {
+    const polled = o.filter((r) => r.t.market === undefined);
+    const held = (xs: OppRecord[]) => xs.filter((r) => STAGES.indexOf(r.stage) >= STAGES.indexOf("executable")).length;
+    lrow("event-triggered:", `${evented.length} acted on, ${pct(held(evented), evented.length)} still there at re-quote`);
+    lrow("polled:", `${polled.length} acted on, ${pct(held(polled), polled.length)} still there at re-quote`);
+  }
+  if (d.benchmark) {
+    const b = d.benchmark;
+    const ms = (x: number | null | undefined) => (x === null || x === undefined ? "n/a" : `${Math.round(x)} ms`);
+    out.push("");
+    out.push(`Measured here (npm run benchmark, ${new Date(b.ts).toISOString().slice(0, 16).replace("T", " ")} UTC)`);
+    lrow("RPC round trip:", `${ms(b.rpcSlot.medianMs)} median, ${ms(b.rpcSlot.p90Ms)} p90`);
+    if (b.quoteRoundTrip) lrow("Jupiter, both legs:", `${ms(b.quoteRoundTrip.medianMs)} median, ${ms(b.quoteRoundTrip.p90Ms)} p90`);
+    if (b.minGapLifetimeMs !== null) lrow("a gap must last at least:", ms(b.minGapLifetimeMs));
+  }
   out.push("");
   // "Best" by real money if there is any, else by on-chain simulation; never by quotes.
   const evidence = landed.length ? landed : simOk;

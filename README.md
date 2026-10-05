@@ -126,6 +126,23 @@ that token (2 requests), re-checking it about every 2 seconds, with a full
 scan every third time so nothing else is ignored. Wallet balances (Helius)
 are read at most once a minute to stay well inside the free RPC plan.
 
+## Event triggers and latency
+
+Besides checking tokens in turn, the bot listens over the RPC's WebSocket to
+the pools its routes use (`EVENT_TRIGGERS=on`). When one changes, that token
+is quoted right away instead of waiting its turn, and every opportunity
+records how long it took from that change to the quote. Limits keep it cheap:
+at most `MAX_WATCHED_POOLS` pools, at most `EVENT_DAILY_CAP` updates a day,
+and pools that change nearly every block are rested for an hour (constant
+change carries no signal). `npm run report` compares how often event-triggered
+and polled gaps were still there at the fresh re-quote.
+
+`npm run benchmark` measures, from your phone, how long the RPC, Jupiter
+(both legs), Jito and the WebSocket take, and so how long a gap must last for
+this bot to even confirm it. Nothing is signed or sent. While the bot runs it
+skips the Jupiter part (the bot uses the whole request limit and times its own
+quotes; `npm run status` shows them).
+
 ## Limits
 
 There is **no profit cap**. Trade size is a share of the wallet
@@ -159,6 +176,7 @@ npm start                # paper mode by default (or: npm run paper)
 npm run status           # is it running, what it's doing, test progress
 npm run watch            # same, live (refreshes every 5s)
 npm run report           # quoted vs simulated vs realized, risk, go-live verdict
+npm run benchmark        # measured latency to RPC, Jupiter, Jito, WebSocket
 npm run stop-trading     # emergency stop; npm run enable-trading lifts it
 npm test
 ```

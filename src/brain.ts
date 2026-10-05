@@ -217,6 +217,11 @@ export class Brain {
 
   // ---- which tokens -------------------------------------------------------
 
+  /** Symbols, most promising first (the same order scans use). */
+  rankTokens(symbols: string[]): string[] {
+    return [...symbols].sort((a, b) => this.score(b) - this.score(a));
+  }
+
   /** Drops a discovered token (e.g. one the safety check blocked). Returns true if it was there. */
   forgetToken(symbol: string): boolean {
     if (!(symbol in this.state.discovered)) return false;

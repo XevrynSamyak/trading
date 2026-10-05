@@ -30,6 +30,10 @@ export interface LiveStatus {
   scansLastMin?: number;
   /** Opportunities acted on today, by the furthest funnel stage reached. */
   funnelToday?: Record<string, number>;
+  /** Typical time to quote all legs of one cycle, measured by the bot (ms). */
+  quoteMs?: number;
+  /** Pool event triggers: pools watched, updates today and the daily cap. */
+  events?: { watching: number; eventsToday: number; capped: boolean; tooBusy: number; cap: number };
   /** The most recent opportunity the bot acted on. */
   lastOpp?: { id: string; symbol: string; stage: string; result: string; totalMs: number; quotedBps: number; execBps?: number };
 }
@@ -45,5 +49,16 @@ export function readStatus(path: string): LiveStatus | null {
     return JSON.parse(readFileSync(path, "utf8")) as LiveStatus;
   } catch {
     return null;
+  }
+}
+
+/** Whether a process with this id is running (the bot's pid from status.json). */
+export function isAlive(pid: number | undefined): boolean {
+  if (!pid) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM";
   }
 }

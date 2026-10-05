@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { readJsonWithBackup } from "./atomic.js";
+import type { BenchResult } from "./benchmark.js";
 import { Brain } from "./brain.js";
 import { loadConfig, safetyThresholds, type Config, type Mode } from "./config.js";
 import { gateThresholds, goLiveVerdict, loadGateInput } from "./gate.js";
@@ -66,6 +67,7 @@ export function buildReportData(cfg: Config, now = Date.now()): ReportData & { b
       symbol,
       ...safety.verdict(symbol, mint, symbol in cfg.tokens, now),
     })),
+    benchmark: readJsonWithBackup<BenchResult>(file("benchmark.json"))?.value ?? undefined,
     brainSummary: brain.summary(),
   };
 }

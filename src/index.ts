@@ -30,6 +30,7 @@ import { installConsoleRedaction, log } from "./log.js";
 import { makeNotifier } from "./notify.js";
 import { usdToUsdcAtoms } from "./profit.js";
 import { RiskManager } from "./risk.js";
+import { PoolWatcher, rpcSubscriber } from "./poolwatch.js";
 import { checkSecrets } from "./secrets.js";
 import { TokenSafety, canAct, canScan, type SafetyState } from "./tokensafety.js";
 import { fetchSolPriceUsd, scanCycles, type Scored } from "./scanner.js";
@@ -51,16 +52,27 @@ const KILL_SWITCH_POLL_MS = 5_000;
  * deploy/termux-run.sh does not restart on it: restarting cannot fix it.
  */
 const EXIT_REFUSED = 2;
-// Sleep that a stop signal can cut short, so stopping the bot is immediate.
-let wakeUp: (() => void) | undefined;
-const sleep = (ms: number) =>
+// Sleep that a stop signal can cut short, so stopping the bot is immediate. The idle
+// sleep between scans can also be cut short by a pool event; waits for the rate
+// limit cannot (that would send requests before there is room for them).
+let wakeAny: (() => void) | undefined;
+let wakeIdle: (() => void) | undefined;
+const sleep = (ms: number, idle = false) =>
   new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    wakeUp = () => {
+    const done = () => {
       clearTimeout(timer);
+      wakeAny = undefined;
+      if (idle) wakeIdle = undefined;
       resolve();
     };
+    const timer = setTimeout(done, ms);
+    wakeAny = done;
+    if (idle) wakeIdle = done;
   });
+/** A pool event can start the next scan early, but only this many in a row before a full scan. */
+const MAX_EVENT_SCANS_IN_A_ROW = 2;
+/** At most this many dirty tokens per event scan (each costs a quote per leg). */
+const EVENT_SCAN_TOKENS = 2;
 
 async function main() {
   installConsoleRedaction();
@@ -109,7 +121,7 @@ async function main() {
   const budget = new RequestBudget(jupiterRateWindows(cfg.jupiterRpm));
   const jupFetch = budgetedFetch(budget, httpFetch);
   const jup = new JupiterClient(cfg.jupiterApi, jupFetch, cfg.jupiterApiKey);
-  const conn = new Connection(cfg.rpcUrl, { commitment: "confirmed", fetch: httpFetch });
+  const conn = new Connection(cfg.rpcUrl, { commitment: "confirmed", fetch: httpFetch, wsEndpoint: cfg.rpcWsUrl });
   // Only real-money modes ever hold a signer. Paper mode only needs the public address.
   const wallet: Keypair | undefined = isRealMoney(cfg.mode) && cfg.signingKey ? loadKeypair(cfg.signingKey) : undefined;
   const owner =
@@ -146,6 +158,24 @@ async function main() {
     thresholds: safetyThresholds(cfg),
   });
   const lastSafety = new Map<string, SafetyState>();
+  // Event triggers: re-quote a token as soon as a pool its route uses changes.
+  const watcher = cfg.eventTriggers
+    ? new PoolWatcher(
+        rpcSubscriber(conn),
+        {
+          maxPools: cfg.maxWatchedPools,
+          dailyEventCap: cfg.eventDailyCap,
+          debounceMs: cfg.eventDebounceMs,
+          busyPerMin: cfg.busyPoolPerMin,
+        },
+        () => wakeIdle?.(),
+        Date.now,
+        (m) => log.warn(m),
+      )
+    : undefined;
+  const lastPools = new Map<string, string[]>();
+  let quoteMsAvg: number | undefined;
+  let eventScans = 0;
   // Older versions let quote-only paper wins lower the profit bar. Without any
   // result checked on-chain, there is no real evidence for that: undo it.
   if (brain.restoredFromBackup) log.warn("brain file was unreadable; restored what it learned from the backup copy");
@@ -165,7 +195,7 @@ async function main() {
   for (const sig of ["SIGINT", "SIGTERM"] as const) {
     process.on(sig, () => {
       running = false;
-      wakeUp?.();
+      wakeAny?.();
     });
   }
 
@@ -393,7 +423,21 @@ async function main() {
         await sleep(cfg.scanIntervalMs * 4);
         continue;
       }
-      const tokens = brain.pickTokens(scannable);
+      // A pool just changed: quote those tokens now, while any gap is fresh
+      // (with a full scan every few turns so nothing else is ignored).
+      const dirty = (watcher?.takeDirty() ?? []).filter((d) => d.symbol in scannable);
+      const marketTs = new Map<string, number>();
+      let tokens: Record<string, string>;
+      if (dirty.length && eventScans < MAX_EVENT_SCANS_IN_A_ROW) {
+        eventScans += 1;
+        tokens = Object.fromEntries(dirty.slice(0, EVENT_SCAN_TOKENS).map((d) => [d.symbol, scannable[d.symbol]]));
+        for (const d of dirty.slice(EVENT_SCAN_TOKENS)) watcher!.remark(d.symbol, d.ts);
+      } else {
+        eventScans = 0;
+        tokens = brain.pickTokens(scannable);
+        for (const d of dirty) if (!(d.symbol in tokens)) watcher!.remark(d.symbol, d.ts);
+      }
+      for (const d of dirty) if (d.symbol in tokens) marketTs.set(d.symbol, d.ts);
       scanTimes.push(Date.now());
       const specs: CycleSpec[] = Object.entries(tokens).map(([sym, mint]) => twoLegSpec(sym, mint));
       const buckets: Record<string, SizeBucket> = {};
@@ -434,14 +478,24 @@ async function main() {
           if (String(err).includes(" 429")) rateLimited = true;
           log.warn(`quote ${spec.symbol} failed: ${String(err).slice(0, 120)}`);
         },
-        // Each leg costs 1 request; wait until the cycle fits in every rate window.
+        // Each leg costs 1 request. Wait until the cycle fits in every rate window
+        // AND enough room stays free to execute a gap at once (re-quote, and build
+        // when testing on-chain): a gap found but executed seconds later is gone.
         beforeEach: async (spec) => {
-          await waitForJupiter(spec.path.length - 1);
+          const legs = spec.path.length - 1;
+          await waitForJupiter(legs + (withWallet ? legs * 2 : legs));
           if (!running) throw new Error("stopping");
         },
         // Gaps last moments: act on the first one worth it instead of quoting the rest first.
         stopAfter: (x) => worthActing(x, rank(x).ev),
+        marketTsFor: (spec) => marketTs.get(spec.symbol),
       });
+      for (const { cycle } of scored) {
+        lastPools.set(cycle.symbol, cycle.pools);
+        // Measured time to quote every leg of a cycle, from this device.
+        const ms = cycle.quotedAt - cycle.quoteStartedAt;
+        quoteMsAvg = quoteMsAvg === undefined ? ms : quoteMsAvg * 0.8 + ms * 0.2;
+      }
       for (const { cycle, val } of scored) {
         brain.observeScan(cycle.symbol, val.netBps, val.netUsd, buckets[cycle.symbol]);
         const wasHot = brain.isHot(cycle.symbol);
@@ -599,6 +653,16 @@ async function main() {
         else log.event(line);
       }
 
+      // Follow the pools of the most promising tokens the bot may act on.
+      if (watcher) {
+        const actable = Object.keys(scannable).filter((sym) => canAct(safetyOf(sym, scannable[sym]).state, cfg.mode));
+        try {
+          await watcher.watch(brain.rankTokens(actable).map((symbol) => ({ symbol, pools: lastPools.get(symbol) ?? [] })));
+        } catch (err) {
+          log.warn(`pool watching failed: ${String(err).slice(0, 120)}`);
+        }
+      }
+
       brain.observePace(rateLimited);
       nextWaitMs = brain.nextIntervalMs(best?.val.netBps, cfg.scanIntervalMs);
       const focus = brain.plannedRequests() < TOKENS_PER_SCAN * 2 ? brain.hotSymbols() : [];
@@ -626,6 +690,8 @@ async function main() {
           execBps: lastOpp.executable?.netBps,
         },
         nextScanInMs: nextWaitMs,
+        events: watcher && { ...watcher.stats(), cap: cfg.eventDailyCap },
+        quoteMs: quoteMsAvg === undefined ? undefined : Math.round(quoteMsAvg),
         lastBest: best && {
           symbol: best.cycle.symbol,
           netBps: best.val.netBps,
@@ -638,10 +704,11 @@ async function main() {
       log.error("cycle error:", err);
       publish({ note: `last cycle error: ${String(err).slice(0, 100)}`, nextScanInMs: nextWaitMs });
     }
-    await sleep(nextWaitMs);
+    await sleep(nextWaitMs, true);
   }
 
   brain.save();
+  await watcher?.unwatchAll().catch(() => {});
   publish({ state: "stopped", note: undefined, nextScanInMs: 0 });
   await notify("Stopped.");
 }
