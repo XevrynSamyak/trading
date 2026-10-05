@@ -136,6 +136,20 @@ cd ~/trading && npm run stop-trading
 It stays stopped, even after a restart, until you check why and run
 `npm run enable-trading`.
 
+Optional: watch it from another device on the same Wi-Fi. Add to `.env`:
+
+```
+STATUS_HTTP_PORT=8787
+STATUS_HTTP_HOST=0.0.0.0
+STATUS_HTTP_TOKEN=<a long random password, 16+ characters>
+```
+
+Restart the bot; `data/bot.log` shows the address, e.g.
+`http://192.168.1.23:8787/`. Open it with `?token=<your token>` at the end
+for a self-refreshing status page with an **emergency stop** button. It can
+only stop trading, never start it: re-enabling stays on the phone
+(`npm run enable-trading`).
+
 Optional: put `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env` (create a
 bot with @BotFather) to get trade alerts and daily summaries on your main
 phone.

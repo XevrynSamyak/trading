@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { bar, duration, renderStatus, type StatusInput } from "../src/status.js";
+import { bar, duration, renderStatus, resultsOf, type StatusInput } from "../src/status.js";
 
 const now = Date.parse("2026-10-05T12:00:00Z");
 const base: StatusInput = {
@@ -13,7 +13,7 @@ const base: StatusInput = {
   processAlive: true,
   halted: null,
   killSwitch: null,
-  records: [],
+  results: resultsOf([], Date.parse("2026-10-05T12:00:00Z")),
   brainStartedAt: now - 1.5 * 86_400_000,
   paperDaysTarget: 3,
   verdict: {

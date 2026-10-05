@@ -31,7 +31,12 @@ import { installConsoleRedaction, log } from "./log.js";
 import { makeNotifier } from "./notify.js";
 import { usdToUsdcAtoms } from "./profit.js";
 import { RiskManager } from "./risk.js";
+import { networkInterfaces } from "node:os";
 import { PoolWatcher, rpcSubscriber } from "./poolwatch.js";
+import { renderReport } from "./report.js";
+import { buildReportData } from "./report-cli.js";
+import { checkServerOptions, createStatusServer } from "./server.js";
+import { gatherStatus } from "./status.js";
 import { checkSecrets } from "./secrets.js";
 import { TokenSafety, canAct, canScan, type SafetyState } from "./tokensafety.js";
 import { fetchSolPriceUsd, scanCycles, type Scored } from "./scanner.js";
@@ -99,6 +104,16 @@ async function main() {
   if (existsSync(haltFile)) {
     log.error(`Bot is halted (${haltFile}). Read it, then delete it to restart.`);
     process.exit(EXIT_REFUSED);
+  }
+
+  // Optional status server: status page, JSON, report, emergency stop. Never starts trading.
+  const serverOpts = cfg.statusHttpPort === undefined ? undefined : { host: cfg.statusHttpHost, port: cfg.statusHttpPort, token: cfg.statusHttpToken };
+  if (serverOpts) {
+    const problem = checkServerOptions(serverOpts);
+    if (problem) {
+      log.error(`Refusing to start: ${problem}`);
+      process.exit(EXIT_REFUSED);
+    }
   }
 
   // The go-live gate: paper profits are never evidence. LIVE (adaptive size)
@@ -195,6 +210,26 @@ async function main() {
     brain.save();
     process.exit(0);
   };
+
+  const server =
+    serverOpts &&
+    createStatusServer(serverOpts, {
+      status: () => ({ ...gatherStatus(cfg), processAlive: true }),
+      report: () => renderReport(buildReportData(cfg)),
+      stopTrading: (reason) => {
+        disableTrading(cfg.dataDir, reason);
+        wakeIdle?.();
+      },
+    });
+  if (server && serverOpts) {
+    server.on("error", (err) => log.warn(`status server: ${err.message}`));
+    server.listen(serverOpts.port, serverOpts.host, () => {
+      const lan = serverOpts.host === "0.0.0.0" || serverOpts.host === "::"
+        ? Object.values(networkInterfaces()).flat().filter((n) => n && n.family === "IPv4" && !n.internal).map((n) => n!.address)
+        : [serverOpts.host];
+      log.info(`status page: ${lan.map((h) => `http://${h}:${serverOpts.port}/`).join(" or ")}${serverOpts.token ? " (add ?token=<STATUS_HTTP_TOKEN>)" : ""}`);
+    });
+  }
 
   let running = true;
   for (const sig of ["SIGINT", "SIGTERM"] as const) {
@@ -726,6 +761,7 @@ async function main() {
 
   brain.save();
   await watcher?.unwatchAll().catch(() => {});
+  server?.close();
   publish({ state: "stopped", note: undefined, nextScanInMs: 0 });
   await notify("Stopped.");
 }

@@ -8,6 +8,9 @@
 const PATTERNS: [RegExp, string][] = [
   // ?api-key=... / &apiKey=... (Helius RPC URL, other providers)
   [/(api[-_]?key=)[^&\s"'<>]+/gi, "$1***"],
+  // ?token=... (status page links) and "Bearer ..." headers
+  [/([?&]token=)[^&\s"'<>]+/gi, "$1***"],
+  [/(Bearer\s+)[A-Za-z0-9._~+/=-]{8,}/g, "$1***"],
   // "x-api-key": "..." / x-api-key=...
   [/("?x-api-key"?\s*[:=]\s*"?)[^"',\s}]+/gi, "$1***"],
   // Jupiter API keys

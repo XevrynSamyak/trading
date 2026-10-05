@@ -160,6 +160,17 @@ this bot to even confirm it. Nothing is signed or sent. While the bot runs it
 skips the Jupiter part (the bot uses the whole request limit and times its own
 quotes; `npm run status` shows them).
 
+## Status page (optional)
+
+With `STATUS_HTTP_PORT` set, the bot serves its status screen, the report and
+an emergency-stop button over HTTP (`/`, `/status.json`, `/report.txt`,
+`POST /stop-trading`). It is read-only apart from stopping: nothing there can
+start trading, re-enable it, change settings or move money. It listens on the
+phone only (`127.0.0.1`) unless `STATUS_HTTP_HOST=0.0.0.0`, which the bot
+refuses without a `STATUS_HTTP_TOKEN` of 16+ characters. From a laptop,
+`ENGINE_URL=http://<phone-ip>:8787 ENGINE_TOKEN=<token> npm run watch` shows
+the phone's status screen.
+
 ## Limits
 
 There is **no profit cap**. Trade size is a share of the wallet

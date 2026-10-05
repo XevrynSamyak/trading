@@ -173,6 +173,10 @@ export interface Config {
   trianglePivot: string;
   /** Every Nth full scan quotes triangles instead of two-leg round trips. */
   triangleEvery: number;
+  /** Optional status server (status page, JSON, report, emergency stop). Off when unset. */
+  statusHttpPort?: number;
+  statusHttpHost: string;
+  statusHttpToken?: string;
   telegramBotToken?: string;
   telegramChatId?: string;
   dataDir: string;
@@ -289,6 +293,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     triangles: env.TRIANGLES !== "off",
     trianglePivot: env.TRIANGLE_PIVOT || "SOL",
     triangleEvery: Math.max(2, Math.floor(num(env, "TRIANGLE_EVERY", 4))),
+    statusHttpPort: env.STATUS_HTTP_PORT ? num(env, "STATUS_HTTP_PORT", 0) : undefined,
+    statusHttpHost: env.STATUS_HTTP_HOST || "127.0.0.1",
+    statusHttpToken: env.STATUS_HTTP_TOKEN || undefined,
     telegramBotToken: env.TELEGRAM_BOT_TOKEN || undefined,
     telegramChatId: env.TELEGRAM_CHAT_ID || undefined,
     dataDir: env.DATA_DIR || "./data",

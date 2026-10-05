@@ -1,11 +1,11 @@
 import { tailLines } from "./tail.js";
 import { join } from "node:path";
 import { Brain, EDGE_BINS } from "./brain.js";
-import { loadConfig } from "./config.js";
+import { loadConfig, type Config } from "./config.js";
 import { FunnelReader } from "./funnel.js";
 import { gateThresholds, goLiveVerdict, loadGateInput, type Verdict } from "./gate.js";
 import { halted, tradingDisabled } from "./killswitch.js";
-import { Ledger, startOfUtcDay, totalsByBasis, type Basis, type TradeRecord } from "./ledger.js";
+import { Ledger, startOfUtcDay, totalsByBasis, type Basis, type BasisTotals, type TradeRecord } from "./ledger.js";
 import { isAlive, readStatus, type LiveStatus } from "./status-file.js";
 
 /**
@@ -17,14 +17,31 @@ const DAY_MS = 86_400_000;
 const EVENT_PATTERN =
   /FILLED|REJECTED|FAILED|TIMEOUT|DISABLED|re-enabled|moving fast|found new tokens|HALTED|paused|Started|Stopped|cycle error|too many requests|crashed|stopped|refused|quote-only/;
 
-export interface StatusInput {
-  now: number;
+/** Results per basis, today and all time: quoted, simulated and realized are never added together. */
+export interface StatusResults {
+  today: Record<Basis, BasisTotals>;
+  all: Record<Basis, BasisTotals>;
+  failed: number;
+  fake: number;
+}
+
+export function resultsOf(records: TradeRecord[], now: number): StatusResults {
+  return {
+    today: totalsByBasis(records, startOfUtcDay(now)),
+    all: totalsByBasis(records),
+    failed: records.filter((r) => r.status === "failed").length,
+    fake: records.filter((r) => r.status === "rejected").length,
+  };
+}
+
+/** Everything the status screen shows. Plain JSON, so a remote dashboard can show it too. */
+export interface StatusData {
   live: LiveStatus | null;
   processAlive: boolean;
   halted: string | null;
   /** Kill switch reason while data/TRADING_DISABLED exists. */
   killSwitch: string | null;
-  records: TradeRecord[];
+  results: StatusResults;
   brainStartedAt: number;
   /** Days of paper testing the go-live gate wants. */
   paperDaysTarget: number;
@@ -33,6 +50,10 @@ export interface StatusInput {
   edgeHistogram: Record<string, number>;
   thoughts: string[];
   events: string[];
+}
+
+export interface StatusInput extends StatusData {
+  now: number;
   color: boolean;
 }
 
@@ -175,10 +196,7 @@ export function renderStatus(i: StatusInput): string {
   }
 
   // --- results: quoted, simulated and realized are NEVER added together ------
-  const allT = totalsByBasis(i.records);
-  const todayT = totalsByBasis(i.records, startOfUtcDay(i.now));
-  const failed = i.records.filter((r) => r.status === "failed").length;
-  const fake = i.records.filter((r) => r.status === "rejected").length;
+  const { all: allT, today: todayT, failed, fake } = i.results;
   out.push("");
   out.push(bold("Results") + dim("  (today / all time)"));
   const row = (name: string, b: Basis, note: string) =>
@@ -229,9 +247,8 @@ const readCached = (path: string) => {
   return r.read();
 };
 
-function gather(): StatusInput {
-  const cfg = loadConfig();
-  const now = Date.now();
+/** Reads the data folder. The engine's status server calls this too. */
+export function gatherStatus(cfg: Config, now = Date.now()): StatusData {
   const live = readStatus(join(cfg.dataDir, "status.json"));
   const brain = new Brain(join(cfg.dataDir, `brain-${cfg.mode}.json`), { baseMinProfitBps: cfg.minProfitBps });
   const kill = tradingDisabled(cfg.dataDir);
@@ -242,12 +259,11 @@ function gather(): StatusInput {
     // The verdict is a hint on this screen; `npm run report` shows any problem.
   }
   return {
-    now,
     live,
     processAlive: isAlive(live?.pid),
     halted: halted(cfg.dataDir),
     killSwitch: kill.disabled ? (kill.reason ?? "disabled") : null,
-    records: new Ledger(join(cfg.dataDir, `trades-${cfg.mode}.jsonl`)).all(),
+    results: resultsOf(Ledger.read(join(cfg.dataDir, `trades-${cfg.mode}.jsonl`)), now),
     brainStartedAt: brain.state.startedAt,
     paperDaysTarget: cfg.gateMinPaperDays,
     verdict,
@@ -256,19 +272,40 @@ function gather(): StatusInput {
     events: tailLines(join(cfg.dataDir, "bot.log"), 400)
       .filter((l) => EVENT_PATTERN.test(l))
       .slice(-6),
-    color: process.stdout.isTTY ?? false,
   };
+}
+
+/** A remote engine's status (ENGINE_URL), e.g. the phone's, seen from a laptop. */
+export async function fetchRemoteStatus(engineUrl: string, token: string | undefined, fetchFn: typeof fetch = fetch): Promise<StatusData> {
+  const res = await fetchFn(`${engineUrl.replace(/\/$/, "")}/status.json`, {
+    headers: token ? { authorization: `Bearer ${token}` } : {},
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!res.ok) throw new Error(`engine answered ${res.status}${res.status === 401 ? " (check ENGINE_TOKEN)" : ""}`);
+  return (await res.json()) as StatusData;
+}
+
+async function screen(): Promise<string> {
+  const color = process.stdout.isTTY ?? false;
+  const engine = process.env.ENGINE_URL;
+  if (!engine) return renderStatus({ ...gatherStatus(loadConfig()), now: Date.now(), color });
+  try {
+    const data = await fetchRemoteStatus(engine, process.env.ENGINE_TOKEN || process.env.STATUS_HTTP_TOKEN);
+    return renderStatus({ ...data, now: Date.now(), color }) + `\n\n(from ${engine})`;
+  } catch (err) {
+    return `Cannot reach the bot at ${engine}: ${String(err instanceof Error ? err.message : err).slice(0, 160)}`;
+  }
 }
 
 if (process.argv[1]?.endsWith("status.ts")) {
   if (process.argv.includes("--watch")) {
-    const draw = () => {
+    const draw = async () => {
       // Clear the screen and redraw in place.
-      process.stdout.write("\x1b[2J\x1b[H" + renderStatus(gather()) + "\n\n(refreshes every 5s, Ctrl+C to exit)\n");
+      process.stdout.write("\x1b[2J\x1b[H" + (await screen()) + "\n\n(refreshes every 5s, Ctrl+C to exit)\n");
     };
-    draw();
-    setInterval(draw, 5_000);
+    void draw();
+    setInterval(() => void draw(), 5_000);
   } else {
-    console.log(renderStatus(gather()));
+    void screen().then((text) => console.log(text));
   }
 }
