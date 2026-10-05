@@ -95,7 +95,19 @@ export interface Config {
   /** How live trades are sent: "jito" (failed attempts cost nothing) or plain "rpc". */
   sendVia: "jito" | "rpc";
   jitoUrl: string;
+  /** Minimum Jito tip (lamports). Jito's own minimum is 1000. */
   jitoTipLamports: number;
+  /** Maximum Jito tip (lamports), whatever the expected profit. */
+  jitoMaxTipLamports: number;
+  /** Share of the expected profit (after other costs) offered as tip. */
+  jitoTipShare: number;
+  /** Extra margin before calling something profitable: bps of trade size + fixed USD. */
+  safetyBufferBps: number;
+  safetyBufferUsd: number;
+  /** Cap on how far the last leg may fill below its fresh quote (the on-chain floor is never lower than cost + min profit). */
+  maxSlippageBps: number;
+  /** Give up waiting for a landing after this long; an unknown outcome trips the kill switch. */
+  landingTimeoutMs: number;
   tokens: Record<string, string>;
   /** Fraction of the wallet's USDC used per trade; trades grow as the wallet grows. */
   tradeSizePct: number;
@@ -175,7 +187,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     microMaxTradeUsd: num(env, "MICRO_MAX_TRADE_USD", 5),
     sendVia,
     jitoUrl: (env.JITO_URL || "https://mainnet.block-engine.jito.wtf/api/v1").replace(/\/$/, ""),
-    jitoTipLamports: num(env, "JITO_TIP_LAMPORTS", 10_000),
+    jitoTipLamports: num(env, "JITO_TIP_LAMPORTS", 1_000),
+    jitoMaxTipLamports: num(env, "JITO_MAX_TIP_LAMPORTS", 2_000_000),
+    jitoTipShare: num(env, "JITO_TIP_SHARE", 0.25),
+    safetyBufferBps: num(env, "SAFETY_BUFFER_BPS", 3),
+    safetyBufferUsd: num(env, "SAFETY_BUFFER_USD", 0.001),
+    maxSlippageBps: num(env, "MAX_SLIPPAGE_BPS", 100),
+    landingTimeoutMs: num(env, "LANDING_TIMEOUT_MS", 120_000),
     tokens,
     tradeSizePct: num(env, "TRADE_SIZE_PCT", 0.8),
     maxTradeUsd: num(env, "MAX_TRADE_USD", 0),
@@ -206,6 +224,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (!(cfg.tradeSizePct > 0 && cfg.tradeSizePct <= 1)) {
     throw new Error("TRADE_SIZE_PCT must be in (0, 1]");
   }
+  if (!(cfg.jitoTipShare >= 0 && cfg.jitoTipShare < 1)) throw new Error("JITO_TIP_SHARE must be in [0, 1)");
+  if (cfg.jitoMaxTipLamports < cfg.jitoTipLamports) throw new Error("JITO_MAX_TIP_LAMPORTS must be >= JITO_TIP_LAMPORTS");
   if (!(cfg.microMaxTradeUsd > 0 && cfg.microMaxTradeUsd <= 25)) {
     throw new Error("MICRO_MAX_TRADE_USD must be between 0 and 25 (MICRO is for tiny proof trades)");
   }
@@ -226,7 +246,20 @@ export function tradeSizeUsd(cfg: Pick<Config, "tradeSizePct" | "maxTradeUsd">, 
   return Math.floor(capped * 100) / 100;
 }
 
-/** Everything a landed trade pays the network on top of the 5000-lamport base fee. */
+/** Minimum a landed trade pays the network on top of the 5000-lamport base fee (priority + minimum tip). */
 export function extraFeeLamports(cfg: Pick<Config, "priorityFeeLamports" | "sendVia" | "jitoTipLamports">): number {
   return cfg.priorityFeeLamports + (cfg.sendVia === "jito" ? cfg.jitoTipLamports : 0);
+}
+
+/** The cost-model settings from the config. */
+export function costSettings(cfg: Config): import("./costs.js").CostSettings {
+  return {
+    priorityFeeLamports: cfg.priorityFeeLamports,
+    sendVia: cfg.sendVia,
+    tipShare: cfg.jitoTipShare,
+    minTipLamports: cfg.jitoTipLamports,
+    maxTipLamports: cfg.jitoMaxTipLamports,
+    safetyBufferBps: cfg.safetyBufferBps,
+    safetyBufferUsd: cfg.safetyBufferUsd,
+  };
 }

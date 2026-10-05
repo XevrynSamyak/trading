@@ -8,8 +8,26 @@ export interface QuoteResponse {
   otherAmountThreshold: string;
   slippageBps: number;
   priceImpactPct: string;
-  routePlan: { swapInfo: { label?: string } }[];
+  routePlan: RouteStep[];
+  /** Slot of the market state the quote was computed from (if Jupiter sends it). */
+  contextSlot?: number;
   [key: string]: unknown;
+}
+
+export interface RouteStep {
+  swapInfo: {
+    label?: string;
+    /** The pool (AMM) account this hop trades through. */
+    ammKey?: string;
+    inputMint?: string;
+    outputMint?: string;
+    inAmount?: string;
+    outAmount?: string;
+    feeAmount?: string;
+    feeMint?: string;
+  };
+  /** Share of the leg routed through this step (split routes). */
+  percent?: number;
 }
 
 export interface RawInstruction {

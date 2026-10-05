@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
+import type { CostSettings } from "../src/costs.js";
+import { twoLegSpec } from "../src/cycle.js";
 import { JupiterClient } from "../src/jupiter.js";
-import { scan } from "../src/scanner.js";
+import { scanCycles } from "../src/scanner.js";
+
+/** Old fixed-fee setup: 5000 base + 10000 priority lamports, no tip, no buffer. */
+const FEES: CostSettings = {
+  priorityFeeLamports: 10_000, sendVia: "rpc", tipShare: 0, minTipLamports: 0, maxTipLamports: 0,
+  safetyBufferBps: 0, safetyBufferUsd: 0,
+};
+const specs = (...syms: string[]) => syms.map((s) => twoLegSpec(s, s));
 
 /** Fake Jupiter: token X has a 1% gap, token Y loses 0.3%. */
 function fakeFetch(): typeof fetch {
@@ -22,10 +31,12 @@ function fakeFetch(): typeof fetch {
 describe("scan", () => {
   it("ranks round trips by net profit after fees", async () => {
     const jup = new JupiterClient("https://fake", fakeFetch());
-    const opps = await scan(jup, { Y: "Y", X: "X" }, () => 10_000_000n, 10_000, 200);
-    expect(opps.map((o) => o.symbol)).toEqual(["X", "Y"]);
-    expect(opps[0].eval.netUsd).toBeCloseTo(0.1 - 0.003, 6);
-    expect(opps[1].eval.netUsd).toBeLessThan(0);
+    const opps = await scanCycles(jup, specs("Y", "X"), () => 10_000_000n, 200, FEES);
+    expect(opps.map((o) => o.cycle.symbol)).toEqual(["X", "Y"]);
+    expect(opps[0].val.netUsd).toBeCloseTo(0.1 - 0.003, 6);
+    expect(opps[1].val.netUsd).toBeLessThan(0);
+    expect(opps[0].cycle.legs).toHaveLength(2);
+    expect(opps[0].cycle.routes).toBe("Fake | Fake");
   });
 });
 
@@ -43,8 +54,8 @@ describe("parallel scan", () => {
       return base(url);
     }) as typeof fetch;
     const errors: string[] = [];
-    const opps = await scan(new JupiterClient("https://fake", fetchFn), { X: "X", Y: "Y", BAD: "BAD" }, () => 10_000_000n, 10_000, 200, (s, e) => errors.push(`${s}: ${String(e)}`));
-    expect(opps.map((o) => o.symbol)).toEqual(["X", "Y"]);
+    const opps = await scanCycles(new JupiterClient("https://fake", fetchFn), specs("X", "Y", "BAD"), () => 10_000_000n, 200, FEES, (s, e) => errors.push(`${s.symbol}: ${String(e)}`));
+    expect(opps.map((o) => o.cycle.symbol)).toEqual(["X", "Y"]);
     expect(errors[0]).toMatch(/^BAD: .*429/);
     expect(maxInFlight).toBe(3);
   });
@@ -63,10 +74,10 @@ describe("parallel scan", () => {
       return base(url);
     }) as typeof fetch;
     let waits = 0;
-    const opps = await scan(new JupiterClient("https://fake", fetchFn), { X: "X", Y: "Y" }, () => 10_000_000n, 10_000, 200, () => {}, async () => {
+    const opps = await scanCycles(new JupiterClient("https://fake", fetchFn), specs("X", "Y"), () => 10_000_000n, 200, FEES, () => {}, async () => {
       waits++;
     });
-    expect(opps.map((o) => o.symbol)).toEqual(["X", "Y"]);
+    expect(opps.map((o) => o.cycle.symbol)).toEqual(["X", "Y"]);
     expect(waits).toBe(2);
     expect(maxInFlight).toBe(1);
     expect(order).toEqual(["buy", "sell", "buy", "sell"]); // each token's two legs stay together
@@ -74,7 +85,7 @@ describe("parallel scan", () => {
 
   it("a failing pacing hook (bot stopping) skips the token instead of crashing", async () => {
     const errors: string[] = [];
-    const opps = await scan(new JupiterClient("https://fake", fakeFetch()), { X: "X" }, () => 10_000_000n, 10_000, 200, (s) => errors.push(s), async () => {
+    const opps = await scanCycles(new JupiterClient("https://fake", fakeFetch()), specs("X"), () => 10_000_000n, 200, FEES, (s) => errors.push(s.symbol), async () => {
       throw new Error("stopping");
     });
     expect(opps).toEqual([]);

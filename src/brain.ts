@@ -404,15 +404,16 @@ export class Brain {
    */
   observeTrade(
     symbol: string,
-    status: "filled" | "rejected" | "skipped" | "failed",
+    status: "filled" | "rejected" | "skipped" | "failed" | "stale" | "timeout",
     netUsd: number,
     verified = true,
   ): void {
     const s = this.stats(symbol);
     s.pnlUsd += netUsd;
     let bps = this.state.minProfitBps;
-    if (status === "rejected") {
-      // Gap was fake but cost nothing: trust this token less, threshold unchanged.
+    if (status === "rejected" || status === "stale") {
+      // Gap was fake (gone at re-quote, or would revert) but cost nothing:
+      // trust this token less, threshold unchanged.
       s.phantoms += 1;
     } else if (status === "failed" || (status === "filled" && netUsd < 0)) {
       s.failures += status === "failed" ? 1 : 0;

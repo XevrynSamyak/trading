@@ -5,7 +5,6 @@ import { Brain, type SizeBucket } from "./brain.js";
 import { RequestBudget, budgetedFetch } from "./budget.js";
 import {
   TOKENS_PER_SCAN,
-  extraFeeLamports,
   isRealMoney,
   jupiterRateWindows,
   loadConfig,
@@ -13,7 +12,9 @@ import {
   tradeSizeUsd,
 } from "./config.js";
 import { discoverTokens } from "./discovery.js";
-import { liveExecute, paperExecute, simulateExecute, type ExecResult } from "./executor.js";
+import { costSettings as makeCostSettings } from "./config.js";
+import { twoLegSpec, type CycleSpec } from "./cycle.js";
+import { liveExecute, quoteOnlyExecute, simulateExecute, type ExecResult } from "./executor.js";
 import { JitoClient } from "./jito.js";
 import { JupiterClient } from "./jupiter.js";
 import { Ledger, basisOf, moneyBasis, startOfUtcDay, startOfUtcMonth, type Basis } from "./ledger.js";
@@ -22,7 +23,7 @@ import { makeNotifier } from "./notify.js";
 import { usdToUsdcAtoms } from "./profit.js";
 import { RiskManager } from "./risk.js";
 import { checkSecrets } from "./secrets.js";
-import { fetchSolPriceUsd, scan } from "./scanner.js";
+import { fetchSolPriceUsd, scanCycles, type Scored } from "./scanner.js";
 import { writeStatus, type LiveStatus } from "./status-file.js";
 import { formatVerdict, monthVerdict, shouldRetire } from "./sustain.js";
 import { BalanceCache, loadKeypair, walletValueUsd } from "./wallet.js";
@@ -90,7 +91,7 @@ async function main() {
   if (brain.minProfitBps < cfg.minProfitBps && !ledger.all().some((r) => r.verified && r.status === "filled")) {
     brain.state.minProfitBps = cfg.minProfitBps;
   }
-  const extraLamports = extraFeeLamports(cfg);
+  const costs = makeCostSettings(cfg);
 
   const halt = async (reason: string) => {
     writeFileSync(haltFile, `${new Date().toISOString()} ${reason}\n`);
@@ -281,90 +282,109 @@ async function main() {
 
       const tokens = brain.pickTokens(brain.tokenPool(cfg.tokens));
       scanTimes.push(Date.now());
+      const specs: CycleSpec[] = Object.entries(tokens).map(([sym, mint]) => twoLegSpec(sym, mint));
       const buckets: Record<string, SizeBucket> = {};
-      const sizeFor = (sym: string) => {
-        const pick = brain.pickSize(sym, sizeUsd);
-        buckets[sym] = pick.bucket;
+      const sizeFor = (spec: CycleSpec) => {
+        const pick = brain.pickSize(spec.symbol, sizeUsd);
+        buckets[spec.symbol] = pick.bucket;
         return usdToUsdcAtoms(pick.usd);
       };
-      const opps = await scan(
+      const scored = await scanCycles(
         jup,
-        tokens,
+        specs,
         sizeFor,
-        extraLamports,
         solPrice,
-        (sym, err) => {
+        costs,
+        (spec, err) => {
           if (!running) return; // stopping: skip the remaining quotes quietly
           if (String(err).includes(" 429")) rateLimited = true;
-          log.warn(`quote ${sym} failed: ${String(err).slice(0, 120)}`);
+          log.warn(`quote ${spec.symbol} failed: ${String(err).slice(0, 120)}`);
         },
-        // Each token costs 2 requests; wait until they fit in every rate window.
-        async () => {
-          await waitForJupiter(2);
+        // Each leg costs 1 request; wait until the cycle fits in every rate window.
+        async (spec) => {
+          await waitForJupiter(spec.path.length - 1);
           if (!running) throw new Error("stopping");
         },
       );
-      for (const o of opps) {
-        brain.observeScan(o.symbol, o.eval.netBps, o.eval.netUsd, buckets[o.symbol]);
-        const wasHot = brain.isHot(o.symbol);
-        const move = brain.observePrice(o.symbol, buckets[o.symbol], Number(o.leg1.outAmount) / Number(o.leg1.inAmount));
-        if (move !== null && !wasHot && brain.isHot(o.symbol)) {
-          log.event(`${o.symbol} is moving fast (${move.toFixed(0)}bps); watching it closely`);
+      for (const { cycle, val } of scored) {
+        brain.observeScan(cycle.symbol, val.netBps, val.netUsd, buckets[cycle.symbol]);
+        const wasHot = brain.isHot(cycle.symbol);
+        const leg1 = cycle.legs[0];
+        const move = brain.observePrice(cycle.symbol, buckets[cycle.symbol], Number(leg1.outAmount) / Number(leg1.inAmount));
+        if (move !== null && !wasHot && brain.isHot(cycle.symbol)) {
+          log.event(`${cycle.symbol} is moving fast (${move.toFixed(0)}bps); watching it closely`);
         }
       }
-      if (opps[0]) brain.observeCycle(opps[0].eval.netBps, opps[0].symbol);
+      if (scored[0]) brain.observeCycle(scored[0].val.netBps, scored[0].cycle.symbol);
 
       // Rank by what the brain expects really to happen, not the raw quote.
-      const expected = (o: (typeof opps)[number]) => brain.expectedNetBps(o.symbol, o.eval.netBps);
-      const best = [...opps].sort((a, b) => expected(b) - expected(a))[0];
+      const expected = (x: Scored) => brain.expectedNetBps(x.cycle.symbol, x.val.netBps);
+      const best = [...scored].sort((a, b) => expected(b) - expected(a))[0];
       if (best) {
         const exp = expected(best);
         log.info(
-          `best ${best.symbol} $${best.eval.inUsd.toFixed(2)}: quoted net ${best.eval.netBps.toFixed(1)}bps ` +
-            (Math.abs(exp - best.eval.netBps) >= 0.1 ? `(expect ${exp.toFixed(1)}) ` : "") +
-            `($${best.eval.netUsd.toFixed(4)}) need ${brain.minProfitBps}bps [${best.routes}]`,
+          `best ${best.cycle.symbol} $${best.val.inUsd.toFixed(2)}: quoted net ${best.val.netBps.toFixed(1)}bps ` +
+            (Math.abs(exp - best.val.netBps) >= 0.1 ? `(expect ${exp.toFixed(1)}) ` : "") +
+            `($${best.val.netUsd.toFixed(4)} after $${best.val.costs.totalUsd.toFixed(4)} costs) ` +
+            `need ${brain.minProfitBps}bps [${best.cycle.routes}]`,
         );
       }
 
-      if (best && brain.shouldAttempt(best.symbol, best.eval.netBps)) {
-        const deps = { conn, jup, cfg, solPriceUsd: solPrice, tipAccount: pickTip() };
+      if (best && brain.shouldAttempt(best.cycle.symbol, best.val.netBps)) {
+        const { cycle, val } = best;
+        const deps = {
+          conn,
+          jup,
+          cfg,
+          costSettings: costs,
+          solPriceUsd: solPrice,
+          tipAccount: pickTip(),
+          floorBps: Math.min(brain.minProfitBps, cfg.minProfitBps),
+        };
+        const legs = cycle.legs.length;
         let result: ExecResult;
-        // Building a real transaction re-quotes once and fetches two sets of swap instructions.
-        if (simulateAs || isRealMoney(cfg.mode)) await waitForJupiter(3);
-        if (isRealMoney(cfg.mode) && wallet) result = await liveExecute(best, wallet, { ...deps, jito });
-        else if (simulateAs) result = await simulateExecute(best, simulateAs, deps);
-        else result = paperExecute(best);
+        // A fresh quote of every leg, plus (to build a real transaction) one swap-instructions call per leg.
+        await waitForJupiter(simulateAs || isRealMoney(cfg.mode) ? legs * 2 : legs);
+        if (isRealMoney(cfg.mode) && wallet) result = await liveExecute(cycle, val, wallet, { ...deps, jito });
+        else if (simulateAs) result = await simulateExecute(cycle, val, simulateAs, deps);
+        else result = await quoteOnlyExecute(cycle, val, deps);
 
+        const basis: Basis = isRealMoney(cfg.mode) ? "realized" : result.verified ? "simulated" : "quoted";
         ledger.append({
           ts: Date.now(),
           mode: cfg.mode,
-          symbol: best.symbol,
+          symbol: cycle.symbol,
           status: result.status,
-          inUsd: best.eval.inUsd,
+          inUsd: val.inUsd,
           netUsd: result.netUsd,
           feeUsd: result.feeUsd,
           signature: result.signature,
           reason: result.reason,
           verified: result.verified,
-          basis: isRealMoney(cfg.mode) ? "realized" : result.verified ? "simulated" : "quoted",
+          basis,
         });
-        brain.observeTrade(best.symbol, result.status, result.netUsd, result.verified === true);
+        brain.observeTrade(cycle.symbol, result.status, result.netUsd, result.verified === true);
         // A landed trade moved real money: read fresh balances next cycle.
         if (isRealMoney(cfg.mode) && (result.status === "filled" || result.status === "failed")) balanceCache?.invalidate();
         if (result.verified && (result.status === "filled" || result.status === "rejected")) {
-          const realBps = result.status === "filled" ? (result.netUsd / best.eval.inUsd) * 10_000 : 0;
-          brain.observeReality(best.symbol, best.eval.netBps, realBps);
+          const realBps = result.status === "filled" ? (result.netUsd / val.inUsd) * 10_000 : 0;
+          brain.observeReality(cycle.symbol, val.netBps, realBps);
         }
         risk.recordResult(result.status);
+        if (result.status === "timeout") {
+          await halt(`could not confirm whether a real trade landed (${result.reason}). Check it before restarting`);
+        }
 
         const label = isRealMoney(cfg.mode)
           ? `${result.status.toUpperCase()} (real)`
-          : result.verified
-            ? `SIMULATED ${result.status === "filled" ? "OK" : result.status.toUpperCase()}`
-            : "QUOTE-ONLY (not real profit)";
-        const amount = isRealMoney(cfg.mode) ? "realized" : result.verified ? "simulated" : "quoted";
+          : result.status === "stale"
+            ? "GONE AT RE-QUOTE"
+            : result.verified
+              ? `SIMULATED ${result.status === "filled" ? "OK" : result.status.toUpperCase()}`
+              : "QUOTE-ONLY (not real profit)";
+        const exec = result.executable ? ` | fresh re-quote ${result.executable.netBps.toFixed(1)}bps` : "";
         const line =
-          `${label} ${best.symbol} $${best.eval.inUsd.toFixed(2)}: ${amount} net $${result.netUsd.toFixed(4)}` +
+          `${label} ${cycle.symbol} $${val.inUsd.toFixed(2)}: ${basis} net $${result.netUsd.toFixed(4)}${exec}` +
           (result.signature ? ` https://solscan.io/tx/${result.signature}` : "") +
           (result.reason ? ` (${result.reason})` : "");
         if (result.status === "filled" || result.status === "failed") await notify(line);
@@ -372,7 +392,7 @@ async function main() {
       }
 
       brain.observePace(rateLimited);
-      nextWaitMs = brain.nextIntervalMs(best?.eval.netBps, cfg.scanIntervalMs);
+      nextWaitMs = brain.nextIntervalMs(best?.val.netBps, cfg.scanIntervalMs);
       const focus = brain.plannedRequests() < TOKENS_PER_SCAN * 2 ? brain.hotSymbols() : [];
       if (rateLimited) {
         nextWaitMs = Math.max(nextWaitMs, RATE_LIMIT_BACKOFF_MS);
@@ -389,9 +409,9 @@ async function main() {
         scansLastMin: scansInLastMinute(),
         nextScanInMs: nextWaitMs,
         lastBest: best && {
-          symbol: best.symbol,
-          netBps: best.eval.netBps,
-          expectedBps: brain.expectedNetBps(best.symbol, best.eval.netBps),
+          symbol: best.cycle.symbol,
+          netBps: best.val.netBps,
+          expectedBps: brain.expectedNetBps(best.cycle.symbol, best.val.netBps),
           needBps: brain.minProfitBps,
         },
       });
