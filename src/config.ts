@@ -130,6 +130,16 @@ export interface Config {
   lossFloorUsd: number;
   dailyLossLimitUsd: number;
   maxConsecutiveFailures: number;
+  maxConsecutiveLosses: number;
+  /** A single trade losing more than this trips the kill switch. */
+  unexpectedLossUsd: number;
+  /** LIVE gate: MICRO evidence needed before LIVE may start. */
+  gateMicroMinTrades: number;
+  gateMicroMinProfitableRate: number;
+  /** MICRO verdict: days of paper testing and on-chain simulation evidence wanted first. */
+  gateMinPaperDays: number;
+  gateMinSimulated: number;
+  gateMinSimSuccessRate: number;
   failureCooldownMs: number;
   scanIntervalMs: number;
   /** Absolute fastest the bot may ever scan, whatever the budget allows. */
@@ -214,7 +224,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       .sort((a, b) => a - b),
     maxLadderPoints: Math.max(1, Math.floor(num(env, "MAX_LADDER_POINTS", 4))),
     tokens,
-    tradeSizePct: num(env, "TRADE_SIZE_PCT", 0.8),
+    // Maximum capital exposure per trade (share of USDC on hand). TRADE_SIZE_PCT is the older name.
+    tradeSizePct: num(env, "MAX_EXPOSURE_PCT", num(env, "TRADE_SIZE_PCT", 0.8)),
     maxTradeUsd: num(env, "MAX_TRADE_USD", 0),
     minProfitBps: num(env, "MIN_PROFIT_BPS", 20),
     // Through Jito the tip does the work, so the priority fee can be tiny.
@@ -225,6 +236,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     lossFloorUsd: num(env, "LOSS_FLOOR_USD", +(startingBalanceUsd * num(env, "LOSS_FLOOR_PCT", 0.7)).toFixed(2)),
     dailyLossLimitUsd: num(env, "DAILY_LOSS_LIMIT_USD", 2),
     maxConsecutiveFailures: num(env, "MAX_CONSECUTIVE_FAILURES", 5),
+    maxConsecutiveLosses: num(env, "MAX_CONSECUTIVE_LOSSES", 3),
+    unexpectedLossUsd: num(env, "UNEXPECTED_LOSS_USD", 0.05),
+    gateMicroMinTrades: num(env, "GATE_MICRO_MIN_TRADES", 20),
+    gateMicroMinProfitableRate: num(env, "GATE_MICRO_MIN_PROFITABLE_RATE", 0.7),
+    gateMinPaperDays: num(env, "GATE_MIN_PAPER_DAYS", 3),
+    gateMinSimulated: num(env, "GATE_MIN_SIMULATED", 30),
+    gateMinSimSuccessRate: num(env, "GATE_MIN_SIM_SUCCESS_RATE", 0.3),
     failureCooldownMs: num(env, "FAILURE_COOLDOWN_MS", 10 * 60_000),
     scanIntervalMs: num(env, "SCAN_INTERVAL_MS", 5_000),
     minScanIntervalMs: num(env, "MIN_SCAN_INTERVAL_MS", 1_000),

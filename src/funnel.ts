@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Mode } from "./config.js";
 import type { Valuation } from "./costs.js";
@@ -127,18 +127,22 @@ export function buildOppRecord(args: {
   cycle: Cycle;
   val: Valuation;
   result: ExecResult;
+  /** When the bot decided to act: after ranking and the size ladder. */
   decisionTs: number;
+  /** The scan quote that first showed the gap (default: `cycle`); the ladder may re-quote later. */
+  detected?: Pick<Cycle, "quoteStartedAt" | "quotedAt" | "marketTs">;
   expected: OppRecord["expected"];
   solPriceUsd: number;
   ladder?: OppRecord["ladder"];
 }): OppRecord {
   const { cycle, val, result, mode } = args;
+  const detected = args.detected ?? cycle;
   const realMoney = mode !== "paper";
   const bpsOf = (usd: number) => (val.inUsd > 0 ? (usd / val.inUsd) * 10_000 : 0);
   const t: OppTimes = {
-    market: cycle.marketTs,
-    quoteStart: cycle.quoteStartedAt,
-    quoteEnd: cycle.quotedAt,
+    market: detected.marketTs,
+    quoteStart: detected.quoteStartedAt,
+    quoteEnd: detected.quotedAt,
     decision: args.decisionTs,
     requoteStart: result.t.requoteStart,
     requoteEnd: result.t.requoteEnd,
@@ -239,5 +243,51 @@ export class Funnel {
       }
     }
     return out;
+  }
+}
+
+/**
+ * Incremental reader for screens that refresh (`npm run watch`): each call
+ * parses only the complete lines added since the last call.
+ */
+export class FunnelReader {
+  private offset = 0;
+  private records: OppRecord[] = [];
+
+  constructor(private readonly path: string) {}
+
+  read(): OppRecord[] {
+    if (!existsSync(this.path)) {
+      this.offset = 0;
+      this.records = [];
+      return this.records;
+    }
+    const size = statSync(this.path).size;
+    if (size < this.offset) {
+      // The file was replaced (e.g. a reset): start over.
+      this.offset = 0;
+      this.records = [];
+    }
+    if (size === this.offset) return this.records;
+    const buf = Buffer.alloc(size - this.offset);
+    const fd = openSync(this.path, "r");
+    try {
+      readSync(fd, buf, 0, buf.length, this.offset);
+    } finally {
+      closeSync(fd);
+    }
+    // Only consume complete lines; a line being written right now is read next time.
+    const end = buf.lastIndexOf(10);
+    if (end < 0) return this.records;
+    for (const line of buf.subarray(0, end).toString("utf8").split("\n")) {
+      if (!line) continue;
+      try {
+        this.records.push(JSON.parse(line) as OppRecord);
+      } catch {
+        // skip a torn line
+      }
+    }
+    this.offset += end + 1;
+    return this.records;
   }
 }

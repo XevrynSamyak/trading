@@ -37,6 +37,13 @@ export class RequestBudget {
     return this.times.filter((t) => t > now - windowMs).length;
   }
 
+  /** How many more requests fit in every window right now. */
+  available(now = Date.now()): number {
+    this.prune(now);
+    const room = this.windows.map((w) => w.limit - this.times.filter((t) => t > now - w.ms).length);
+    return Math.max(0, Math.min(...room));
+  }
+
   /** How long to wait (ms) before `n` more requests fit in every window. */
   waitFor(n: number, now = Date.now()): number {
     this.prune(now);

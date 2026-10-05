@@ -107,3 +107,26 @@ describe("opportunity score", () => {
     expect(scoreOpportunity({ ...base, evUsd: -0.1 })).toBe(-0.1); // never turns negative EV positive
   });
 });
+
+describe("opportunity timeline", () => {
+  it("times from the scan quote that found the gap, even when the size ladder re-quoted later", async () => {
+    const { buildOppRecord } = await import("../src/funnel.js");
+    const ladderCycle = {
+      kind: "two-leg", symbol: "SOL", tokens: ["SOL"], path: [], inAtoms: 20_000_000n, legs: [], outAtoms: 20_050_000n,
+      quoteStartedAt: T0 + 2_000, quotedAt: T0 + 2_400, routes: "A | B", priceImpactBps: 1, dexFeeBps: 30, pools: [],
+    } as unknown as import("../src/cycle.js").Cycle;
+    const val = {
+      inUsd: 20, outUsd: 20.05, grossUsd: 0.05, grossBps: 25, netUsd: 0.04, netBps: 20,
+      costs: { baseFeeLamports: 5000, priorityFeeLamports: 1000, tipLamports: 1000, networkUsd: 0.001, tipUsd: 0, bufferUsd: 0.001, totalUsd: 0.002 },
+    } as unknown as import("../src/costs.js").Valuation;
+    const opp = buildOppRecord({
+      id: "opp_1", mode: "paper", cycle: ladderCycle, val, decisionTs: T0 + 2_500,
+      detected: { quoteStartedAt: T0, quotedAt: T0 + 300 },
+      result: { status: "stale", netUsd: 0, feeUsd: 0, t: { requoteStart: T0 + 2_510, requoteEnd: T0 + 2_900 } },
+      expected: { pSuccess: 0.5, evUsd: 0.02, assumed: [] }, solPriceUsd: 150,
+    });
+    expect(opp.lat.quoteMs).toBe(300);
+    expect(opp.lat.quoteToDecisionMs).toBe(2_200); // ranking + ladder quotes, never negative
+    expect(opp.lat.totalMs).toBe(2_900);
+  });
+});

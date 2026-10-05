@@ -70,9 +70,17 @@ mode has two levels:
   signed or sent, and no secret key is needed. Gaps that wouldn't hold are
   counted as **fake gaps**; real ones record what they'd actually have made.
 
-`npm run report` ends with a **Go live?** verdict based only on on-chain
-tested results: `KEEP-TESTING`, `NO-GAPS`, `VERIFY-FIRST`, `ALL-FAKE`,
-`NOT-WORTH-IT` or `TRY-LIVE`.
+`npm run report` ends with a **go-live verdict** that never counts quotes or
+paper profits as evidence:
+
+- **MICRO LIVE: YES** only after at least 3 days of paper testing and 30
+  trades simulated on-chain, of which at least 30% succeeded and made money
+  on average after every cost.
+- **FULL LIVE: YES** only after at least 20 MICRO trades landed, at least 70%
+  were profitable, realized P&L is positive, and no landing went unconfirmed.
+  The bot **refuses to start** `MODE=live` otherwise.
+
+Each "NO" lists its reasons, e.g. `Insufficient real execution sample`.
 
 ## Live trading through Jito
 
@@ -103,15 +111,22 @@ are read at most once a minute to stay well inside the free RPC plan.
 ## Limits
 
 There is **no profit cap**. Trade size is a share of the wallet
-(`TRADE_SIZE_PCT`), so trades grow as the wallet grows. The only limits are
+(`MAX_EXPOSURE_PCT`), so trades grow as the wallet grows. The only limits are
 on losses:
 
 | Guard | Default | Effect |
 |---|---|---|
+| `MICRO_MAX_TRADE_USD` | $5 | Hard cap per trade in MICRO mode |
 | `LOSS_FLOOR_USD` | 70% of start | Stops permanently (writes `data/HALTED`) |
 | `DAILY_LOSS_LIMIT_USD` | $2 | Pauses until the next UTC day |
 | `MAX_CONSECUTIVE_FAILURES` | 5 | 10-minute cooldown |
+| `MAX_CONSECUTIVE_LOSSES` | 3 | 10-minute cooldown |
+| `UNEXPECTED_LOSS_USD` | $0.05 | A real trade losing more, or a landing that can't be confirmed, **disables trading** until you re-enable it |
 | `SUSTAIN_STOP_AFTER_MONTHS` | 2 | Retires if it didn't cover its bills 2 months running |
+
+**Emergency stop:** `npm run stop-trading` (writes `data/TRADING_DISABLED`;
+the running bot stops trading within seconds and waits). Only
+`npm run enable-trading` lifts it, after you've checked why it stopped.
 
 ## Running
 
@@ -122,24 +137,25 @@ On any computer with Node 20+:
 ```bash
 npm install
 cp .env.example .env     # edit it
-npm start                # paper mode by default
+npm start                # paper mode by default (or: npm run paper)
 npm run status           # is it running, what it's doing, test progress
 npm run watch            # same, live (refreshes every 5s)
-npm run report           # P&L, bills verdict, what the brain learned
+npm run report           # quoted vs simulated vs realized, risk, go-live verdict
+npm run stop-trading     # emergency stop; npm run enable-trading lifts it
 npm test
 ```
 
 ### Going live
 
-Only after `npm run report` says `TRY-LIVE`:
+Only after `npm run report` says `MICRO LIVE: YES`:
 
 1. You already have the **brand-new** bot wallet from on-chain testing
    (USDC + ~$3 of SOL for fees and refundable token-account deposits).
-2. In `.env`: `MODE=micro` (tiny real trades first), `LIVE_TRADING_CONFIRM=yes`,
-   `PRIVATE_SIGNING_KEY=<base58 secret of that wallet>`. Never a seed phrase,
-   and never paste it into any chat.
-3. Set `MAX_TRADE_USD=1` for the first run, watch a trade on solscan.io, then
-   set it back to `0`.
+2. In `.env`: `MODE=micro` (tiny real trades, capped at `MICRO_MAX_TRADE_USD`),
+   `LIVE_TRADING_CONFIRM=yes`, `PRIVATE_SIGNING_KEY=<base58 secret of that
+   wallet>`. Never a seed phrase, and never paste it into any chat.
+3. Watch the first trades on solscan.io. `MODE=live` (adaptive size) only
+   starts once `npm run report` says `FULL LIVE: YES`.
 
 Amounts are always labelled: **quoted** (quotes only — never profit),
 **simulated** (the exact transaction simulated on-chain, nothing sent) and

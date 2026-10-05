@@ -9,6 +9,18 @@ export interface Scored {
   val: Valuation;
 }
 
+export interface ScanOptions {
+  onError?: (spec: CycleSpec, err: unknown) => void;
+  /** If given, cycles are quoted one after another, awaiting this before each (rate-limit pacing). */
+  beforeEach?: (spec: CycleSpec) => Promise<void>;
+  marketTsFor?: (spec: CycleSpec) => number | undefined;
+  /**
+   * One-after-another scans only: return true to skip the remaining cycles,
+   * so a gap is acted on while its quote is fresh instead of seconds later.
+   */
+  stopAfter?: (s: Scored) => boolean;
+}
+
 /**
  * Quotes each cycle (at its own size) and values it after costs. Results come
  * back best-first by net USD. Failed quotes are reported and skipped.
@@ -19,22 +31,22 @@ export async function scanCycles(
   sizeFor: (spec: CycleSpec) => bigint,
   solPriceUsd: number,
   costs: CostSettings,
-  onError: (spec: CycleSpec, err: unknown) => void = () => {},
-  /** If given, cycles are quoted one after another, awaiting this before each (rate-limit pacing). */
-  beforeEach?: (spec: CycleSpec) => Promise<void>,
-  marketTsFor?: (spec: CycleSpec) => number | undefined,
+  opts: ScanOptions = {},
 ): Promise<Scored[]> {
+  const onError = opts.onError ?? (() => {});
   const one = async (spec: CycleSpec): Promise<Scored> => {
-    const cycle = await quoteCycle(jup, spec, sizeFor(spec), { marketTs: marketTsFor?.(spec) });
+    const cycle = await quoteCycle(jup, spec, sizeFor(spec), { marketTs: opts.marketTsFor?.(spec) });
     return { cycle, val: valueCycle(cycle, solPriceUsd, costs) };
   };
   const results: Scored[] = [];
-  if (beforeEach) {
+  if (opts.beforeEach) {
     // One cycle at a time: its legs stay back-to-back, and requests are spread out.
     for (const spec of specs) {
       try {
-        await beforeEach(spec);
-        results.push(await one(spec));
+        await opts.beforeEach(spec);
+        const scored = await one(spec);
+        results.push(scored);
+        if (opts.stopAfter?.(scored)) break;
       } catch (err) {
         onError(spec, err);
       }

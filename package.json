@@ -6,9 +6,13 @@
   "description": "Small self-accounting Solana DEX arbitrage bot (paper mode by default)",
   "scripts": {
     "start": "tsx src/index.ts",
+    "paper": "MODE=paper tsx src/index.ts",
+    "micro": "MODE=micro tsx src/index.ts",
     "check": "tsx src/check.ts",
     "status": "tsx src/status.ts",
     "watch": "tsx src/status.ts --watch",
+    "stop-trading": "tsx src/control.ts stop",
+    "enable-trading": "tsx src/control.ts enable",
     "report": "tsx src/report-cli.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"

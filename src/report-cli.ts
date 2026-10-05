@@ -1,36 +1,71 @@
 import { join } from "node:path";
+import { readJsonWithBackup } from "./atomic.js";
 import { Brain } from "./brain.js";
-import { loadConfig } from "./config.js";
-import { Ledger, basisOf, moneyBasis, startOfUtcMonth, totalsByBasis } from "./ledger.js";
-import { assessReadiness } from "./readiness.js";
+import { loadConfig, type Config, type Mode } from "./config.js";
+import { gateThresholds, goLiveVerdict, loadGateInput } from "./gate.js";
+import { Funnel } from "./funnel.js";
+import { Ledger, basisOf, moneyBasis, startOfUtcDay, startOfUtcMonth, totalsByBasis } from "./ledger.js";
+import { renderReport, riskStatus, type ReportData } from "./report.js";
+import { LearningStats } from "./stats.js";
+import { readStatus } from "./status-file.js";
 import { formatVerdict, monthVerdict } from "./sustain.js";
 
-/** `npm run report`: profit, bills verdict, what the brain learned, and whether to go live. */
-const cfg = loadConfig();
-const records = new Ledger(join(cfg.dataDir, `trades-${cfg.mode}.jsonl`)).all();
-const brain = new Brain(join(cfg.dataDir, `brain-${cfg.mode}.json`), { baseMinProfitBps: cfg.minProfitBps });
+/**
+ * `npm run report`: quoted, executable, simulated and realized results kept
+ * apart, across every mode the bot has run in, plus risk status and an
+ * honest go-live verdict.
+ */
+const MODES: Mode[] = ["paper", "micro", "live"];
 
-const count = (status: string) => records.filter((r) => r.status === status).length;
-const money = moneyBasis(cfg.mode);
-const moneyRecords = records.filter((r) => basisOf(r) === money);
-const t = totalsByBasis(records);
-const usd = (n: number) => `${n >= 0 ? "+" : "-"}$${Math.abs(n).toFixed(4)}`;
-console.log(`Mode: ${cfg.mode}`);
-console.log(`Trades: ${count("filled")} filled, ${count("rejected")} fake gaps (cost nothing), ${count("failed")} failed`);
-console.log(`  quoted (NOT profit, quotes only):   ${t.quoted.count} attempts, ${usd(t.quoted.netUsd)}`);
-console.log(`  simulated on-chain (nothing sent):  ${t.simulated.count} attempts, ${usd(t.simulated.netUsd)}`);
-console.log(`  realized (real money):              ${t.realized.count} attempts, ${usd(t.realized.netUsd)}`);
-const moneyNet = t[money].netUsd;
-console.log(`Counted P&L (${money} only): ${usd(moneyNet)}  (wallet ~ $${(cfg.startingBalanceUsd + moneyNet).toFixed(2)})`);
-console.log(
-  formatVerdict(monthVerdict(moneyRecords, startOfUtcMonth(Date.now()), cfg.monthlyCostsUsd)) + ` (month to date, ${money})`,
-);
+export function buildReportData(cfg: Config, now = Date.now()): ReportData & { brainSummary: string } {
+  const file = (name: string) => join(cfg.dataDir, name);
+  const opps = MODES.flatMap((m) => Funnel.read(file(`opps-${m}.jsonl`)));
+  const trades = MODES.flatMap((m) => Ledger.read(file(`trades-${m}.jsonl`)));
+  const scans = MODES.reduce(
+    (s, m) => s + (readJsonWithBackup<{ totalScans?: number }>(file(`brain-${m}.json`))?.value?.totalScans ?? 0),
+    0,
+  );
+  const gate = loadGateInput(cfg.dataDir, now);
+  const verdict = goLiveVerdict(gate, gateThresholds(cfg));
 
-console.log("\nWhat the brain is thinking:");
-for (const t of brain.thoughts(cfg.minProfitBps)) console.log(`- ${t}`);
-console.log("\nBrain details:\n" + brain.summary());
+  // Money that counts in the current mode: simulated in paper, realized in micro/live.
+  const money = moneyBasis(cfg.mode);
+  const mine = trades.filter((r) => r.mode === cfg.mode && basisOf(r) === money);
+  const today = startOfUtcDay(now);
+  const todayPnl = mine.filter((r) => r.ts >= today).reduce((s, r) => s + r.netUsd, 0);
+  const live = readStatus(file("status.json"));
+  const risk = riskStatus({
+    killSwitch: gate.killSwitch,
+    halted: gate.halted,
+    todayMoneyPnlUsd: todayPnl,
+    dailyLossLimitUsd: cfg.dailyLossLimitUsd,
+    timeoutsToday: opps.filter((o) => o.ts >= today && o.result === "timeout").length,
+    walletValueUsd: live?.mode === cfg.mode ? live.walletValueUsd : undefined,
+    lossFloorUsd: cfg.lossFloorUsd,
+  });
 
-if (cfg.mode === "paper") {
-  const r = assessReadiness(records, brain.state.startedAt, Date.now(), cfg.monthlyCostsUsd);
-  console.log(`\nGo live? ${r.verdict.toUpperCase()}\n${r.message}`);
+  const bills = formatVerdict(monthVerdict(mine, startOfUtcMonth(now), cfg.monthlyCostsUsd));
+  const billsLine =
+    `Bills: ${bills} (month to date, ` +
+    (money === "realized" ? "real money)" : "simulated on-chain only; NOT real money)");
+
+  const brain = new Brain(file(`brain-${cfg.mode}.json`), { baseMinProfitBps: cfg.minProfitBps });
+  return {
+    modeNow: cfg.mode,
+    scans,
+    opps,
+    stats: LearningStats.fromRecords(opps),
+    quotedOnlyUsd: totalsByBasis(trades).quoted.netUsd,
+    verdict,
+    risk,
+    thoughts: brain.thoughts(cfg.minProfitBps),
+    billsLine,
+    brainSummary: brain.summary(),
+  };
+}
+
+if (process.argv[1]?.endsWith("report-cli.ts")) {
+  const data = buildReportData(loadConfig());
+  console.log(renderReport(data));
+  console.log("\nBrain details:\n" + data.brainSummary);
 }

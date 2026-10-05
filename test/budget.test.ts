@@ -60,3 +60,22 @@ describe("RequestBudget (sliding 60s window)", () => {
   });
 });
 
+
+describe("free room right now", () => {
+  it("is the smallest room left in any window", async () => {
+    const { RequestBudget } = await import("../src/budget.js");
+    const b = new RequestBudget([
+      { ms: 60_000, limit: 10 },
+      { ms: 10_000, limit: 3 },
+    ]);
+    expect(b.available(1_000)).toBe(3);
+    b.record(1_000);
+    b.record(2_000);
+    expect(b.available(2_000)).toBe(1);
+    b.record(3_000);
+    expect(b.available(3_000)).toBe(0);
+    // The 10s window empties; the minute window still counts all three.
+    expect(b.available(13_500)).toBe(3);
+    expect(new RequestBudget(5).available(0)).toBe(5);
+  });
+});

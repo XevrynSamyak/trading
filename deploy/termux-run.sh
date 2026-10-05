@@ -2,7 +2,8 @@
 # Keeps the bot running on an Android phone (Termux).
 # - holds a wake lock so Android doesn't put it to sleep
 # - restarts it 30s after a crash
-# - stays stopped after a deliberate halt (loss floor / retirement)
+# - stays stopped after a deliberate halt (loss floor / retirement), or when
+#   the bot refuses to start (exit 2: bad settings, LIVE gate not passed)
 set -u
 cd "$(dirname "$0")/.." || exit 1
 mkdir -p data
@@ -33,6 +34,10 @@ while true; do
   code=$?
   if [ "$code" -eq 0 ]; then
     echo "$(date -u +%FT%TZ) bot stopped cleanly (exit 0); not restarting" >>"$LOG"
+    break
+  fi
+  if [ "$code" -eq 2 ]; then
+    echo "$(date -u +%FT%TZ) bot refused to start (see the reasons above); fix them, then start it again" | tee -a "$LOG"
     break
   fi
   echo "$(date -u +%FT%TZ) bot crashed (exit $code); restarting in ${RESTART_DELAY}s" >>"$LOG"

@@ -12,6 +12,8 @@ import {
   tradeSizeUsd,
 } from "./config.js";
 import { discoverTokens } from "./discovery.js";
+import { gateThresholds, goLiveVerdict, loadGateInput } from "./gate.js";
+import { HALT_FILE, disableTrading, tradingDisabled } from "./killswitch.js";
 import { Funnel, STAGES, buildOppRecord } from "./funnel.js";
 import { DEFAULT_PRIORS, LearningStats, scoreOpportunity } from "./stats.js";
 import { costSettings as makeCostSettings } from "./config.js";
@@ -39,6 +41,13 @@ const TIP_ACCOUNTS_RETRY_MS = 10 * 60_000;
 const RATE_LIMIT_BACKOFF_MS = 10_000;
 /** On-chain tests need SOL for fees and for opening token accounts (~0.002 SOL each). */
 const MIN_SOL_TO_SIMULATE = 0.01;
+/** While the kill switch is on, look for it being lifted this often. */
+const KILL_SWITCH_POLL_MS = 5_000;
+/**
+ * Exit code for "refused to start" (bad settings, LIVE gate not passed).
+ * deploy/termux-run.sh does not restart on it: restarting cannot fix it.
+ */
+const EXIT_REFUSED = 2;
 // Sleep that a stop signal can cut short, so stopping the bot is immediate.
 let wakeUp: (() => void) | undefined;
 const sleep = (ms: number) =>
@@ -52,19 +61,43 @@ const sleep = (ms: number) =>
 
 async function main() {
   installConsoleRedaction();
-  const cfg = loadConfig();
+  let cfg: ReturnType<typeof loadConfig>;
+  try {
+    cfg = loadConfig();
+  } catch (err) {
+    log.error(`Refusing to start: ${(err as Error).message}`);
+    process.exit(EXIT_REFUSED);
+  }
   const secrets = checkSecrets(process.env, { mode: cfg.mode, envFilePath: ".env" });
   for (const w of secrets.warnings) log.warn(w);
   if (secrets.errors.length) {
     for (const e of secrets.errors) log.error(e);
     log.error("Refusing to start until the settings above are fixed.");
-    process.exit(1);
+    process.exit(EXIT_REFUSED);
   }
   const notify = makeNotifier(cfg);
-  const haltFile = join(cfg.dataDir, "HALTED");
+  const haltFile = join(cfg.dataDir, HALT_FILE);
   if (existsSync(haltFile)) {
     log.error(`Bot is halted (${haltFile}). Read it, then delete it to restart.`);
-    process.exit(1);
+    process.exit(EXIT_REFUSED);
+  }
+
+  // The go-live gate: paper profits are never evidence. LIVE (adaptive size)
+  // needs proven MICRO results; MICRO is only warned about, since every trade
+  // is capped at MICRO_MAX_TRADE_USD and its purpose is to collect that proof.
+  if (isRealMoney(cfg.mode)) {
+    const verdict = goLiveVerdict(loadGateInput(cfg.dataDir), gateThresholds(cfg));
+    if (cfg.mode === "live" && !verdict.live.ok) {
+      log.error("LIVE mode refused: real execution has not proven itself yet.");
+      for (const r of verdict.live.reasons) log.error(`  - ${r}`);
+      log.error("Prove execution with tiny capped trades first (npm run micro), then check: npm run report");
+      process.exit(EXIT_REFUSED);
+    }
+    if (cfg.mode === "micro" && !verdict.micro.ok) {
+      log.warn("MICRO is starting although the paper results do not recommend it yet:");
+      for (const r of verdict.micro.reasons) log.warn(`  - ${r}`);
+      log.warn(`Every trade is capped at $${cfg.microMaxTradeUsd}.`);
+    }
   }
 
   // Every Jupiter request goes through one counter covering a 60s and a 10s window, and the
@@ -91,15 +124,17 @@ async function main() {
   // The opportunity funnel is the source of truth for learning; replay it at startup.
   const funnelPath = join(cfg.dataDir, `opps-${cfg.mode}.jsonl`);
   const funnel = new Funnel(funnelPath);
-  const pastOpps = Funnel.read(funnelPath);
-  const learn = LearningStats.fromRecords(pastOpps, { ...DEFAULT_PRIORS, landing: cfg.landingPrior });
   // Today's funnel counts for the status screen: how many reached at least each stage.
   const funnelToday: Record<string, number> = {};
   let funnelDay = startOfUtcDay(Date.now());
   const countStage = (o: import("./funnel.js").OppRecord) => {
     for (const st of STAGES.slice(0, STAGES.indexOf(o.stage) + 1)) funnelToday[st] = (funnelToday[st] ?? 0) + 1;
   };
-  for (const o of pastOpps) if (o.ts >= funnelDay) countStage(o);
+  // (In a function so the replayed records can be freed once counted.)
+  const learn = ((past) => {
+    for (const o of past) if (o.ts >= funnelDay) countStage(o);
+    return LearningStats.fromRecords(past, { ...DEFAULT_PRIORS, landing: cfg.landingPrior });
+  })(Funnel.read(funnelPath));
   const risk = new RiskManager(cfg);
   // Older versions let quote-only paper wins lower the profit bar. Without any
   // result checked on-chain, there is no real evidence for that: undo it.
@@ -149,6 +184,7 @@ async function main() {
   let lastDay = startOfUtcDay(Date.now());
   let lastMonth = startOfUtcMonth(Date.now());
   let warnedUnfunded = false;
+  let killSwitchOn = false;
   let lastOpp: import("./funnel.js").OppRecord | undefined;
 
   // Live progress for `npm run status`.
@@ -202,6 +238,22 @@ async function main() {
   );
 
   while (running) {
+    // Emergency stop (npm run stop-trading, or tripped by an unexpected outcome):
+    // do nothing but wait until a person re-enables trading.
+    const kill = tradingDisabled(cfg.dataDir);
+    if (kill.disabled) {
+      if (!killSwitchOn) {
+        killSwitchOn = true;
+        await notify(`TRADING DISABLED: ${kill.reason}. Waiting. Re-enable after checking: npm run enable-trading`);
+      }
+      publish({ state: "disabled", note: kill.reason, nextScanInMs: KILL_SWITCH_POLL_MS });
+      await sleep(KILL_SWITCH_POLL_MS);
+      continue;
+    }
+    if (killSwitchOn) {
+      killSwitchOn = false;
+      log.event("trading re-enabled by hand; resuming");
+    }
     const now = Date.now();
     cycles += 1;
     let nextWaitMs = cfg.scanIntervalMs;
@@ -306,23 +358,42 @@ async function main() {
         buckets[spec.symbol] = pick.bucket;
         return usdToUsdcAtoms(pick.usd);
       };
-      const scored = await scanCycles(
-        jup,
-        specs,
-        sizeFor,
-        solPrice,
-        costs,
-        (spec, err) => {
+
+      // Rank by expected value (net × learned chance of success), discounted for stale
+      // quotes, slow execution, price impact and unproven tokens — not by the raw quote.
+      const withWallet = !!simulateAs || isRealMoney(cfg.mode);
+      const rank = (x: Scored, at = Date.now()) => {
+        const p = learn.probabilities(x.cycle.symbol, x.cycle.routes, cfg.mode, withWallet);
+        const ev = learn.expectedValue(x.val.netUsd, x.val.costs.networkUsd, p, cfg.mode, withWallet);
+        const score = scoreOpportunity({
+          evUsd: ev,
+          quoteAgeMs: at - x.cycle.quotedAt,
+          expectedLatencyMs: learn.medianishLatencyMs(),
+          priceImpactBps: x.cycle.priceImpactBps,
+          maxImpactBps: cfg.maxPriceImpactBps,
+          discovered: x.cycle.tokens.some((t) => !(t in cfg.tokens)),
+        });
+        return { p, ev, score };
+      };
+      const worthActing = (x: Scored, ev: number) =>
+        brain.shouldAttempt(x.cycle.symbol, x.val.netBps) &&
+        ev >= cfg.minExpectedProfitUsd &&
+        x.cycle.priceImpactBps <= cfg.maxPriceImpactBps;
+
+      const scored = await scanCycles(jup, specs, sizeFor, solPrice, costs, {
+        onError: (spec, err) => {
           if (!running) return; // stopping: skip the remaining quotes quietly
           if (String(err).includes(" 429")) rateLimited = true;
           log.warn(`quote ${spec.symbol} failed: ${String(err).slice(0, 120)}`);
         },
         // Each leg costs 1 request; wait until the cycle fits in every rate window.
-        async (spec) => {
+        beforeEach: async (spec) => {
           await waitForJupiter(spec.path.length - 1);
           if (!running) throw new Error("stopping");
         },
-      );
+        // Gaps last moments: act on the first one worth it instead of quoting the rest first.
+        stopAfter: (x) => worthActing(x, rank(x).ev),
+      });
       for (const { cycle, val } of scored) {
         brain.observeScan(cycle.symbol, val.netBps, val.netUsd, buckets[cycle.symbol]);
         const wasHot = brain.isHot(cycle.symbol);
@@ -334,24 +405,8 @@ async function main() {
       }
       if (scored[0]) brain.observeCycle(scored[0].val.netBps, scored[0].cycle.symbol);
 
-      // Rank by expected value (net × learned chance of success), discounted for stale
-      // quotes, slow execution, price impact and unproven tokens — not by the raw quote.
-      const withWallet = !!simulateAs || isRealMoney(cfg.mode);
-      const decisionTs = Date.now();
-      const rank = (x: Scored) => {
-        const p = learn.probabilities(x.cycle.symbol, x.cycle.routes, cfg.mode, withWallet);
-        const ev = learn.expectedValue(x.val.netUsd, x.val.costs.networkUsd, p, cfg.mode, withWallet);
-        const score = scoreOpportunity({
-          evUsd: ev,
-          quoteAgeMs: decisionTs - x.cycle.quotedAt,
-          expectedLatencyMs: learn.medianishLatencyMs(),
-          priceImpactBps: x.cycle.priceImpactBps,
-          maxImpactBps: cfg.maxPriceImpactBps,
-          discovered: x.cycle.tokens.some((t) => !(t in cfg.tokens)),
-        });
-        return { p, ev, score };
-      };
-      const ranked = scored.map((x) => ({ ...x, ...rank(x) })).sort((a, b) => b.score - a.score);
+      const rankedAt = Date.now();
+      const ranked = scored.map((x) => ({ ...x, ...rank(x, rankedAt) })).sort((a, b) => b.score - a.score);
       const expected = (x: Scored) => brain.expectedNetBps(x.cycle.symbol, x.val.netBps);
       const best = ranked[0];
       if (best) {
@@ -365,19 +420,20 @@ async function main() {
         );
       }
 
-      if (
-        best &&
-        brain.shouldAttempt(best.cycle.symbol, best.val.netBps) &&
-        best.ev >= cfg.minExpectedProfitUsd &&
-        best.cycle.priceImpactBps <= cfg.maxPriceImpactBps
-      ) {
+      if (best && worthActing(best, best.ev)) {
         // Size ladder: try a few sizes (within every limit) and keep the best expected value.
+        // Only with requests free right now (keeping enough to execute): waiting seconds
+        // for room to compare sizes would let the gap close.
         let { cycle, val } = best;
         let chosenP = best.p;
         let chosenEv = best.ev;
         let ladder: import("./funnel.js").OppRecord["ladder"];
         let ladderSaysNo = false;
-        const sizes = ladderSizes(cfg.sizeLadderUsd, { maxUsd: sizeUsd, minUsd: 1 }, cfg.maxLadderPoints, best.val.inUsd);
+        const legsN = best.cycle.legs.length;
+        const execRequests = simulateAs || isRealMoney(cfg.mode) ? legsN * 2 : legsN;
+        const spareSizes = Math.max(0, Math.floor((budget.available() - execRequests) / legsN));
+        const points = Math.min(cfg.maxLadderPoints, 1 + spareSizes);
+        const sizes = ladderSizes(cfg.sizeLadderUsd, { maxUsd: sizeUsd, minUsd: 1 }, points, best.val.inUsd);
         if (sizes.length > 1) {
           const evOf = (c: Cycle, v: Valuation) =>
             learn.expectedValue(v.netUsd, v.costs.networkUsd, learn.probabilities(c.symbol, c.routes, cfg.mode, withWallet), cfg.mode, withWallet);
@@ -404,6 +460,8 @@ async function main() {
             ladderSaysNo = true;
           }
         }
+        // Detection -> decision includes the ladder's extra quotes: that time counts too.
+        const decidedAt = Date.now();
         const deps = {
           conn,
           jup,
@@ -414,6 +472,8 @@ async function main() {
           floorBps: Math.min(brain.minProfitBps, cfg.minProfitBps),
         };
         const legs = cycle.legs.length;
+        // The scan took seconds; honour a kill switch set meanwhile before sending anything.
+        if (tradingDisabled(cfg.dataDir).disabled) continue;
         let result: ExecResult;
         // A fresh quote of every leg, plus (to build a real transaction) one swap-instructions call per leg.
         if (!ladderSaysNo) await waitForJupiter(simulateAs || isRealMoney(cfg.mode) ? legs * 2 : legs);
@@ -424,12 +484,13 @@ async function main() {
 
         const basis: Basis = isRealMoney(cfg.mode) ? "realized" : result.verified ? "simulated" : "quoted";
         const opp = buildOppRecord({
-          id: funnel.nextId(decisionTs),
+          id: funnel.nextId(decidedAt),
           mode: cfg.mode,
           cycle,
           val,
           result,
-          decisionTs,
+          decisionTs: decidedAt,
+          detected: best.cycle,
           expected: { pSuccess: chosenP.success, evUsd: chosenEv, assumed: chosenP.assumed },
           solPriceUsd: solPrice,
           ladder,
@@ -463,9 +524,15 @@ async function main() {
           const realBps = result.status === "filled" ? (result.netUsd / val.inUsd) * 10_000 : 0;
           brain.observeReality(cycle.symbol, val.netBps, realBps);
         }
-        risk.recordResult(result.status);
-        if (result.status === "timeout") {
-          await halt(`could not confirm whether a real trade landed (${result.reason}). Check it before restarting`);
+        // Only checked outcomes count toward loss streaks; quote-only numbers are not results.
+        risk.recordResult(result.status, Date.now(), result.verified ? result.netUsd : 0);
+        // Something that should not happen with real money (a landing that can't be
+        // confirmed, a loss the on-chain floor should have prevented): stop and ask a person.
+        const unexpected = isRealMoney(cfg.mode) ? risk.unexpected(result.status, result.netUsd) : null;
+        if (unexpected) {
+          disableTrading(cfg.dataDir, `${unexpected} (${opp.id}${result.signature ? `, tx ${result.signature}` : ""})`);
+          killSwitchOn = true;
+          await notify(`TRADING DISABLED: ${unexpected} (${opp.id}). Check it, then: npm run enable-trading`);
         }
 
         const label = isRealMoney(cfg.mode)

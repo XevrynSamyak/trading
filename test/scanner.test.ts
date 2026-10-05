@@ -54,7 +54,7 @@ describe("parallel scan", () => {
       return base(url);
     }) as typeof fetch;
     const errors: string[] = [];
-    const opps = await scanCycles(new JupiterClient("https://fake", fetchFn), specs("X", "Y", "BAD"), () => 10_000_000n, 200, FEES, (s, e) => errors.push(`${s.symbol}: ${String(e)}`));
+    const opps = await scanCycles(new JupiterClient("https://fake", fetchFn), specs("X", "Y", "BAD"), () => 10_000_000n, 200, FEES, { onError: (s, e) => errors.push(`${s.symbol}: ${String(e)}`) });
     expect(opps.map((o) => o.cycle.symbol)).toEqual(["X", "Y"]);
     expect(errors[0]).toMatch(/^BAD: .*429/);
     expect(maxInFlight).toBe(3);
@@ -74,8 +74,10 @@ describe("parallel scan", () => {
       return base(url);
     }) as typeof fetch;
     let waits = 0;
-    const opps = await scanCycles(new JupiterClient("https://fake", fetchFn), specs("X", "Y"), () => 10_000_000n, 200, FEES, () => {}, async () => {
-      waits++;
+    const opps = await scanCycles(new JupiterClient("https://fake", fetchFn), specs("X", "Y"), () => 10_000_000n, 200, FEES, {
+      beforeEach: async () => {
+        waits++;
+      },
     });
     expect(opps.map((o) => o.cycle.symbol)).toEqual(["X", "Y"]);
     expect(waits).toBe(2);
@@ -85,11 +87,29 @@ describe("parallel scan", () => {
 
   it("a failing pacing hook (bot stopping) skips the token instead of crashing", async () => {
     const errors: string[] = [];
-    const opps = await scanCycles(new JupiterClient("https://fake", fakeFetch()), specs("X"), () => 10_000_000n, 200, FEES, (s) => errors.push(s.symbol), async () => {
-      throw new Error("stopping");
+    const opps = await scanCycles(new JupiterClient("https://fake", fakeFetch()), specs("X"), () => 10_000_000n, 200, FEES, {
+      onError: (s) => errors.push(s.symbol),
+      beforeEach: async () => {
+        throw new Error("stopping");
+      },
     });
     expect(opps).toEqual([]);
     expect(errors).toEqual(["X"]);
   });
-});
 
+  it("stops at the first candidate so it is acted on while the quote is fresh", async () => {
+    const quoted: string[] = [];
+    const base = fakeFetch();
+    const fetchFn = (async (url: string) => {
+      const u = new URL(url);
+      if (u.searchParams.get("inputMint")!.startsWith("EPjF")) quoted.push(u.searchParams.get("outputMint")!);
+      return base(url);
+    }) as typeof fetch;
+    const opps = await scanCycles(new JupiterClient("https://fake", fetchFn), specs("Y", "X", "Z"), () => 10_000_000n, 200, FEES, {
+      beforeEach: async () => {},
+      stopAfter: (s) => s.val.netUsd > 0,
+    });
+    expect(opps.map((o) => o.cycle.symbol)).toEqual(["X", "Y"]);
+    expect(quoted).toEqual(["Y", "X"]); // Z was never quoted
+  });
+});

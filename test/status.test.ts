@@ -12,12 +12,17 @@ const base: StatusInput = {
   },
   processAlive: true,
   halted: null,
+  killSwitch: null,
   records: [],
   brainStartedAt: now - 1.5 * 86_400_000,
+  paperDaysTarget: 3,
+  verdict: {
+    micro: { ok: false, reasons: ["only 4 trades simulated on-chain (need 30)", "only 1.5 days of paper data (need 3)"] },
+    live: { ok: false, reasons: ["Insufficient real execution sample: 0 MICRO trades landed (need 20)"] },
+  },
   edgeHistogram: { "-5..0": 8, "-20..-5": 2 },
   thoughts: ["I only trade when a gap pays at least 20bps (0.20%) after fees."],
   events: ["[2026-10-05T10:00:00Z] Started in PAPER mode"],
-  monthlyCosts: { server: 0 },
   color: false,
 };
 
@@ -29,7 +34,10 @@ describe("status screen", () => {
     expect(text).toContain("Last:    SOL -0.8bps, need 20");
     expect(text).toContain("Hot:     BONK");
     expect(text).toContain("Test:    [██████████░░░░░░░░░░] 1.5 / 3 days");
-    expect(text).toContain("Go live? KEEP-TESTING");
+    expect(text).toContain("Go live? MICRO: NO  LIVE: NO");
+    // While paper testing, the next hurdle is MICRO's.
+    expect(text).toContain("         only 4 trades simulated on-chain (need 30)");
+    expect(text).not.toContain("Trading: ■ DISABLED");
     expect(text).toContain("-5..0    ████████████████░░░░ 80.0%");
     expect(text).toContain("Brain thinks");
     expect(text).toContain("Started in PAPER mode");
@@ -41,6 +49,25 @@ describe("status screen", () => {
     expect(renderStatus({ ...base, live: { ...base.live!, updatedAt: now - 10 * 60_000 } })).toContain("● STUCK?");
     expect(renderStatus({ ...base, halted: "loss floor hit" })).toContain("■ HALTED  loss floor hit");
     expect(renderStatus({ ...base, live: null, processAlive: false })).toContain("NOT STARTED YET");
+  });
+
+  it("shows the kill switch, MICRO mode, and LIVE's hurdle once real trades run", () => {
+    const off = renderStatus({
+      ...base,
+      killSwitch: "2026-10-05T11:00:00Z a single trade lost $0.0800",
+      live: { ...base.live!, state: "disabled", note: "a single trade lost $0.0800" },
+    });
+    expect(off).toContain("Trading: ■ DISABLED  2026-10-05T11:00:00Z a single trade lost $0.0800");
+    expect(off).toContain("npm run enable-trading");
+    expect(off).toContain("Doing:   disabled: a single trade lost $0.0800");
+
+    const micro = renderStatus({ ...base, live: { ...base.live!, mode: "micro" } });
+    expect(micro).toContain("● RUNNING  (MICRO, tiny real trades via jito)");
+    expect(micro).not.toContain("Test:");
+    expect(micro).toContain("         Insufficient real execution sample: 0 MICRO trades landed (need 20)");
+
+    const ready = renderStatus({ ...base, verdict: { micro: { ok: true, reasons: [] }, live: { ok: false, reasons: ["x"] } } });
+    expect(ready).toContain("Go live? MICRO: YES  LIVE: NO");
   });
 
   it("shows pauses with their reason", () => {

@@ -112,10 +112,10 @@ the bot keeps running):
 cd ~/trading && npm run watch
 ```
 
-It shows whether the bot is running (or stopped/stuck/halted), the last scan
-and how close it came to a profitable gap, a progress bar for the 3-day test,
-the "Go live?" verdict, results, how close gaps have been, what the brain is
-thinking, and recent events.
+It shows whether the bot is running (or stopped/stuck/halted/disabled), the
+last scan and how close it came to a profitable gap, a progress bar for the
+3-day test, the "Go live?" verdict, results, how close gaps have been, what
+the brain is thinking, and recent events.
 
 For the full numbers:
 
@@ -123,8 +123,18 @@ For the full numbers:
 cd ~/trading && npm run report
 ```
 
-The last lines give a **Go live?** verdict. Only consider live trading when it
-says `TRY-LIVE`.
+It ends with a risk status and a go-live verdict (`MICRO LIVE: YES/NO`,
+`FULL LIVE: YES/NO`) with the reasons. Only consider tiny real trades
+(MICRO) when it says `MICRO LIVE: YES`.
+
+Emergency stop (the bot stops trading within seconds and waits):
+
+```bash
+cd ~/trading && npm run stop-trading
+```
+
+It stays stopped, even after a restart, until you check why and run
+`npm run enable-trading`.
 
 Optional: put `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env` (create a
 bot with @BotFather) to get trade alerts and daily summaries on your main

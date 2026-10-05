@@ -9,7 +9,8 @@ export interface LiveStatus {
   startedAt: number;
   updatedAt: number;
   cycles: number;
-  state: "scanning" | "paused" | "waiting" | "stopped";
+  /** "disabled": the kill switch (data/TRADING_DISABLED) is on; the bot waits. */
+  state: "scanning" | "paused" | "waiting" | "disabled" | "stopped";
   note?: string;
   onChainTesting: boolean;
   sendVia: string;

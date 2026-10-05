@@ -1,10 +1,11 @@
-import { existsSync, readFileSync } from "node:fs";
 import { tailLines } from "./tail.js";
 import { join } from "node:path";
 import { Brain, EDGE_BINS } from "./brain.js";
 import { loadConfig } from "./config.js";
+import { FunnelReader } from "./funnel.js";
+import { gateThresholds, goLiveVerdict, loadGateInput, type Verdict } from "./gate.js";
+import { halted, tradingDisabled } from "./killswitch.js";
 import { Ledger, startOfUtcDay, totalsByBasis, type Basis, type TradeRecord } from "./ledger.js";
-import { assessReadiness } from "./readiness.js";
 import { readStatus, type LiveStatus } from "./status-file.js";
 
 /**
@@ -12,22 +13,26 @@ import { readStatus, type LiveStatus } from "./status-file.js";
  * `npm run watch`         same, refreshing every few seconds (Ctrl+C to exit)
  */
 
-const TEST_DAYS_TARGET = 3;
 const DAY_MS = 86_400_000;
 const EVENT_PATTERN =
-  /FILLED|REJECTED|FAILED|moving fast|found new tokens|HALTED|paused|Started|Stopped|cycle error|too many requests|crashed|stopped|quote-only/;
+  /FILLED|REJECTED|FAILED|TIMEOUT|DISABLED|re-enabled|moving fast|found new tokens|HALTED|paused|Started|Stopped|cycle error|too many requests|crashed|stopped|refused|quote-only/;
 
 export interface StatusInput {
   now: number;
   live: LiveStatus | null;
   processAlive: boolean;
   halted: string | null;
+  /** Kill switch reason while data/TRADING_DISABLED exists. */
+  killSwitch: string | null;
   records: TradeRecord[];
   brainStartedAt: number;
+  /** Days of paper testing the go-live gate wants. */
+  paperDaysTarget: number;
+  /** Go-live gate verdict from paper and MICRO results. */
+  verdict: Verdict | null;
   edgeHistogram: Record<string, number>;
   thoughts: string[];
   events: string[];
-  monthlyCosts: Record<string, number>;
   color: boolean;
 }
 
@@ -78,10 +83,16 @@ export function renderStatus(i: StatusInput): string {
     const how =
       live.mode === "live"
         ? `LIVE, real money via ${live.sendVia}`
-        : live.onChainTesting
-          ? "paper, tested on-chain"
-          : "paper, quote-only";
+        : live.mode === "micro"
+          ? `MICRO, tiny real trades via ${live.sendVia}`
+          : live.onChainTesting
+            ? "paper, tested on-chain"
+            : "paper, quote-only";
     out.push(`Status:  ${green("● RUNNING")}  (${how})  up ${duration(i.now - live.startedAt)}, ${live.cycles} scans`);
+  }
+  if (i.killSwitch && !i.halted) {
+    out.push(`Trading: ${red("■ DISABLED")}  ${i.killSwitch}`);
+    out.push(dim("         Check why, then re-enable: npm run enable-trading"));
   }
 
   if (live && i.processAlive && !i.halted) {
@@ -136,17 +147,22 @@ export function renderStatus(i: StatusInput): string {
     );
   }
 
-  // --- test progress and verdict -------------------------------------------
-  if (!live || live.mode === "paper") {
+  // --- test progress and the go-live gate -----------------------------------
+  const paper = !live || live.mode === "paper";
+  if (paper || i.verdict) out.push("");
+  if (paper) {
     const days = (i.now - i.brainStartedAt) / DAY_MS;
-    out.push("");
     out.push(
-      `Test:    [${bar(days / TEST_DAYS_TARGET, 20)}] ${Math.min(days, 99).toFixed(1)} / ${TEST_DAYS_TARGET} days`,
+      `Test:    [${bar(days / i.paperDaysTarget, 20)}] ${Math.min(days, 99).toFixed(1)} / ${i.paperDaysTarget} days`,
     );
-    const r = assessReadiness(i.records, i.brainStartedAt, i.now, i.monthlyCosts);
-    const v = r.verdict.toUpperCase();
-    const colored = r.verdict === "try-live" ? green(v) : r.verdict === "keep-testing" ? yellow(v) : red(v);
-    out.push(`Go live? ${colored}  ${dim(r.message)}`);
+  }
+  if (i.verdict) {
+    const v = i.verdict;
+    const yn = (ok: boolean) => (ok ? green("YES") : red("NO"));
+    out.push(`Go live? MICRO: ${yn(v.micro.ok)}  LIVE: ${yn(v.live.ok)}  ${dim("(npm run report explains)")}`);
+    // The next hurdle: MICRO's while paper testing, LIVE's once real trades run.
+    const why = (paper ? v.micro.reasons : v.live.reasons)[0];
+    if (why) out.push(dim(`         ${why}`));
   }
 
   // --- results: quoted, simulated and realized are NEVER added together ------
@@ -205,24 +221,41 @@ function isAlive(pid: number | undefined): boolean {
   }
 }
 
+// Funnel files only grow; when refreshing, parse just the new lines.
+const readers = new Map<string, FunnelReader>();
+const readCached = (path: string) => {
+  let r = readers.get(path);
+  if (!r) readers.set(path, (r = new FunnelReader(path)));
+  return r.read();
+};
+
 function gather(): StatusInput {
   const cfg = loadConfig();
+  const now = Date.now();
   const live = readStatus(join(cfg.dataDir, "status.json"));
   const brain = new Brain(join(cfg.dataDir, `brain-${cfg.mode}.json`), { baseMinProfitBps: cfg.minProfitBps });
-  const haltPath = join(cfg.dataDir, "HALTED");
+  const kill = tradingDisabled(cfg.dataDir);
+  let verdict: Verdict | null = null;
+  try {
+    verdict = goLiveVerdict(loadGateInput(cfg.dataDir, now, readCached), gateThresholds(cfg));
+  } catch {
+    // The verdict is a hint on this screen; `npm run report` shows any problem.
+  }
   return {
-    now: Date.now(),
+    now,
     live,
     processAlive: isAlive(live?.pid),
-    halted: existsSync(haltPath) ? readFileSync(haltPath, "utf8").trim() : null,
+    halted: halted(cfg.dataDir),
+    killSwitch: kill.disabled ? (kill.reason ?? "disabled") : null,
     records: new Ledger(join(cfg.dataDir, `trades-${cfg.mode}.jsonl`)).all(),
     brainStartedAt: brain.state.startedAt,
+    paperDaysTarget: cfg.gateMinPaperDays,
+    verdict,
     edgeHistogram: brain.state.edgeHistogram,
     thoughts: brain.thoughts(cfg.minProfitBps),
     events: tailLines(join(cfg.dataDir, "bot.log"), 400)
       .filter((l) => EVENT_PATTERN.test(l))
       .slice(-6),
-    monthlyCosts: cfg.monthlyCostsUsd,
     color: process.stdout.isTTY ?? false,
   };
 }
