@@ -16,14 +16,14 @@ const seed = "abandon ability able about above absent absorb abstract absurd abu
 describe("log redaction", () => {
   it("removes API keys, tokens and secret keys, keeps normal text and public addresses", () => {
     const line =
-      `fetch https://mainnet.helius-rpc.com/?api-key=39981cf6-73d8-4b25 failed; ` +
-      `headers {"x-api-key":"abc123"} key jup_5ec7a1c2b494120d3483fe0aadefb9c0 ` +
+      `fetch https://mainnet.helius-rpc.com/?api-key=fa4e0000-test-0000-0000-notarealkey1 failed; ` +
+      `headers {"x-api-key":"abc123"} key jup_00000000deadbeef00000000deadbeef ` +
       `tg https://api.telegram.org/bot123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw/sendMessage ` +
       `secret ${secret} bytes [${Array.from(kp.secretKey).join(",")}] wallet ${pub}`;
     const out = redact(line);
-    expect(out).not.toContain("39981cf6");
+    expect(out).not.toContain("fa4e0000");
     expect(out).not.toContain("abc123");
-    expect(out).not.toContain("5ec7a1c2b4");
+    expect(out).not.toContain("deadbeef");
     expect(out).not.toContain("AAHdqTcvCH1v");
     expect(out).not.toContain(secret);
     expect(out).toContain("[REDACTED-SECRET-KEY]");

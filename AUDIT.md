@@ -187,9 +187,10 @@ so it could end up in `data/bot.log`. Fix: one log function that removes
 `api-key=…`, base58 strings of secret-key length (87–88 characters), and
 `x-api-key`.
 
-🟠 **S2. API keys were pasted into this chat.** The Helius key
-(`…b433`) is still in use. The first Jupiter key was replaced. **Recommend
-rotating the Helius key.**
+🟠 **S2. API keys were pasted into this chat.** The Helius key pasted
+there is still in use, and partial key prefixes were later found in a test
+file (since replaced with fake values). **Recommend rotating the Helius key
+and the current Jupiter key.**
 
 🟡 **S3. Mixing up public and secret keys.** A secret key in
 `WALLET_PUBLIC_KEY` currently produces a `PublicKey` error. There's no explicit
