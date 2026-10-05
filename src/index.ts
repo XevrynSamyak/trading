@@ -58,6 +58,8 @@ const KILL_SWITCH_POLL_MS = 5_000;
  * deploy/termux-run.sh does not restart on it: restarting cannot fix it.
  */
 const EXIT_REFUSED = 2;
+/** A cycle can legitimately wait for a landing (LANDING_TIMEOUT_MS, 2 min) plus requests; beyond this it hung. */
+const WATCHDOG_MS = 6 * 60_000;
 // Sleep that a stop signal can cut short, so stopping the bot is immediate. The idle
 // sleep between scans can also be cut short by a pool event; waits for the rate
 // limit cannot (that would send requests before there is room for them).
@@ -231,6 +233,18 @@ async function main() {
     });
   }
 
+  // Watchdog: if the loop makes no progress for this long (something hung that no
+  // timeout caught), exit with an error so deploy/termux-run.sh restarts the bot.
+  let lastProgressAt = Date.now();
+  const watchdogMs = Math.max(WATCHDOG_MS, cfg.landingTimeoutMs + 4 * 60_000);
+  const watchdog = setInterval(() => {
+    if (Date.now() - lastProgressAt > watchdogMs) {
+      log.error(`no progress for ${Math.round(watchdogMs / 60_000)} minutes: restarting`);
+      process.exit(1);
+    }
+  }, 30_000);
+  watchdog.unref();
+
   let running = true;
   for (const sig of ["SIGINT", "SIGTERM"] as const) {
     process.on(sig, () => {
@@ -319,6 +333,7 @@ async function main() {
   );
 
   while (running) {
+    lastProgressAt = Date.now();
     // Emergency stop (npm run stop-trading, or tripped by an unexpected outcome):
     // do nothing but wait until a person re-enables trading.
     const kill = tradingDisabled(cfg.dataDir);

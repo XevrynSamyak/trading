@@ -122,4 +122,29 @@ describe("pool event triggers", () => {
     expect(w.stats().watching).toBe(1);
     expect(warnings[0]).toMatch(/could not watch pool bad/);
   });
+
+  it("never waits for an unsubscribe reply that may never come", async () => {
+    let live = 0;
+    const sub: AccountSubscriber = {
+      subscribe: () => ++live,
+      unsubscribe: () => new Promise<void>(() => {}), // half-dead socket: no reply, ever
+    };
+    const w = new PoolWatcher(sub, OPTS, () => {}, () => T0);
+    await w.watch([{ symbol: "JUP", pools: ["p1", "p2"] }]);
+    const done = await Promise.race([
+      w.watch([{ symbol: "JUP", pools: ["p3"] }]).then(() => "returned"),
+      new Promise((r) => setTimeout(() => r("hung"), 500)),
+    ]);
+    expect(done).toBe("returned");
+    expect(w.stats().watching).toBe(1);
+  });
+
+  it("gives up on a subscribe that never answers", async () => {
+    const sub: AccountSubscriber = { subscribe: () => new Promise<number>(() => {}), unsubscribe: () => {} };
+    const warnings: string[] = [];
+    const w = new PoolWatcher(sub, OPTS, () => {}, () => T0, (m) => warnings.push(m));
+    await w.watch([{ symbol: "JUP", pools: ["p1"] }]);
+    expect(w.stats().watching).toBe(0);
+    expect(warnings[0]).toMatch(/no answer/);
+  }, 10_000);
 });

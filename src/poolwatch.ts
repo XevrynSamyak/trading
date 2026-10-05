@@ -44,6 +44,22 @@ export interface WatchStats {
 
 const DAY_MS = 86_400_000;
 
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`no answer in ${ms} ms`)), ms);
+    p.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      },
+    );
+  });
+}
+
 export class PoolWatcher {
   /** pool -> subscription id and the tokens whose routes use it */
   private subs = new Map<string, { id: number | null; tokens: Set<string>; times: number[] }>();
@@ -91,7 +107,7 @@ export class PoolWatcher {
       const entry = { id: null as number | null, tokens, times: [] as number[] };
       this.subs.set(pool, entry);
       try {
-        entry.id = await this.sub.subscribe(pool, () => this.onEvent(pool));
+        entry.id = await withTimeout(Promise.resolve(this.sub.subscribe(pool, () => this.onEvent(pool))), 5_000);
       } catch (err) {
         this.subs.delete(pool);
         this.onWarn(`could not watch pool ${pool.slice(0, 8)}…: ${String(err).slice(0, 100)}`);
@@ -102,8 +118,10 @@ export class PoolWatcher {
   private async drop(pool: string, id: number | null): Promise<void> {
     this.subs.delete(pool);
     if (id === null) return;
+    // Never wait for the reply: the WebSocket library waits forever for it, and on a
+    // half-dropped phone connection it never comes, which froze the whole bot.
     try {
-      await this.sub.unsubscribe(id);
+      void Promise.resolve(this.sub.unsubscribe(id)).catch(() => {});
     } catch {
       // already gone (e.g. the socket reconnected)
     }
