@@ -4,15 +4,15 @@ Goal: fixed monthly bills of ~$0, so every cent of profit counts.
 
 1. Create an Oracle Cloud account -> Compute -> Create instance.
    Shape: `VM.Standard.A1.Flex` (Ampere, Always Free), image: Ubuntu 24.04.
-2. SSH in and install Node 22:
+2. SSH in and install the bot (Python 3.10+; Ubuntu 24.04 has 3.12):
    ```bash
-   curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
-   sudo apt-get install -y nodejs git
+   sudo apt-get update && sudo apt-get install -y python3 python3-venv git
    git clone https://github.com/xevrynsamyak/trading.git && cd trading
-   npm ci
+   python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
    cp .env.example .env && nano .env
    ```
-3. Run in paper mode for a few days: `npm start`. Check with `npm run report`.
+3. Run in paper mode for a few days: `.venv/bin/python -m arbbot start`.
+   Check with `.venv/bin/python -m arbbot report`.
 4. Install as a service so it restarts on reboot/crash:
    ```bash
    sudo cp deploy/arb-bot.service /etc/systemd/system/

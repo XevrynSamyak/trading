@@ -25,14 +25,19 @@ Keep the phone plugged in and on Wi-Fi.
 In Termux:
 
 ```bash
-pkg update -y && pkg install -y nodejs git termux-api
+pkg update -y && pkg install -y python git termux-api nodejs
 git clone https://github.com/xevrynsamyak/trading.git
 cd trading
 git checkout claude/keen-ptolemy-y8ns0k
-npm ci
+pip install -r requirements.txt
 cp .env.example .env
 nano .env        # edit settings; Ctrl+O to save, Ctrl+X to exit
 ```
+
+The bot is written in Python. `nodejs` is only there so the short
+`npm run ...` commands below work; each one is a shortcut for
+`python -m arbbot ...` (for example `npm run status` = `python -m arbbot status`),
+so you can use either.
 
 Leave `MODE=paper` for now. Paste your Helius URL into `.env`:
 
@@ -169,7 +174,7 @@ Optional: put `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env` (create a
 bot with @BotFather) to get trade alerts and daily summaries on your main
 phone.
 
-Stop it: `pkill -f termux-run.sh; pkill -f src/index.ts`
+Stop it: `pkill -f termux-run.sh; pkill -f "arbbot start"`
 
 Running `termux-run.sh` again while the bot is running is safe: it just
 says it's already running.
@@ -182,8 +187,26 @@ says it's already running.
 - If the bot halts (it writes `data/HALTED`), read why before deleting that
   file to restart it.
 
+## Updating from the old (Node/TypeScript) version
+
+The bot was rewritten in Python with the same behaviour, commands and data
+files, so everything it learned (the `data/` folder) carries over:
+
+```bash
+cd ~/trading
+pkill -f termux-run.sh; pkill -f "tsx src/index.ts"; pkill -f "arbbot start"
+git pull
+pkg install -y python
+pip install -r requirements.txt
+npm run check
+bash deploy/termux-run.sh &
+```
+
+Your `.env` stays as it is. `rm -rf node_modules` frees about 100 MB (the
+`npm run` shortcuts don't need it).
+
 ## Why not PythonAnywhere?
 
 Its free plan only allows connections to an approved list of websites
-(Solana and Jupiter aren't on it), can't keep a program running all day, and
-this bot runs on Node rather than Python. The paid plan needs a card.
+(Solana and Jupiter aren't on it) and can't keep a program running all day.
+The paid plan needs a card.

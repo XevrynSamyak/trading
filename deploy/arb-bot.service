@@ -8,9 +8,10 @@ Type=simple
 User=ubuntu
 WorkingDirectory=/home/ubuntu/trading
 EnvironmentFile=/home/ubuntu/trading/.env
-ExecStart=/usr/bin/npx tsx src/index.ts
-# Restart on crashes, but not after a deliberate halt (exit code 0).
+ExecStart=/home/ubuntu/trading/.venv/bin/python -m arbbot start
+# Restart on crashes, but not after a deliberate halt (exit code 0) or a refused start (exit code 2).
 Restart=on-failure
+RestartPreventExitStatus=2
 RestartSec=30
 
 [Install]

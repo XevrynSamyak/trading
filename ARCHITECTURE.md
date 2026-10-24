@@ -1,58 +1,67 @@
 # Architecture (V2)
 
-One Node/TypeScript process (the **engine**) runs the trading loop. Every
+One Python process (the **engine**, `python3 -m arbbot start`) runs the trading loop on asyncio. Every
 screen (`status`, `watch`, `report`, `backtest`, the optional status page)
 only reads the files the engine writes, so they can run on the phone or, via
 the status server, on another device.
 
 ```
- .env ──▶ config.ts ──▶ index.ts (main loop) ─────────────────────────────────────────────┐
+ .env ──▶ config.py ──▶ engine.py (main loop) ────────────────────────────────────────────┐
                          │                                                                │
-  Helius WebSocket ──▶ poolwatch.ts  ── pool changed → token "dirty", wake the loop       │
+  Helius WebSocket ──▶ poolwatch.py  ── pool changed → token "dirty", wake the loop       │
   (route pools)          │                                                                │
                          ▼                                                                │
-  kill switch? ─▶ risk.check ─▶ tokensafety.ts ─▶ pick: dirty tokens │ brain.pickTokens │ triangles
+  kill switch? ─▶ risk.check ─▶ tokensafety.py ─▶ pick: dirty tokens │ brain.pick_tokens │ triangles
                          │                                                                │
                          ▼                                                                │
-  scanner.ts: quote every leg (cycle.ts) through budget.ts (60 s + 10 s windows,         │
-              keeping room to execute), value after costs (costs.ts), stop at the first   │
+  scanner.py: quote every leg (cycle.py) through budget.py (60 s + 10 s windows,         │
+              keeping room to execute), value after costs (costs.py), stop at the first   │
               gap worth acting on                                                         │
                          ▼                                                                │
-  rank by EV (stats.ts: Bayesian success rates) ─▶ size ladder (sizer.ts, free budget)   │
+  rank by EV (stats.py: Bayesian success rates) ─▶ size ladder (sizer.py, free budget)   │
                          ▼                                                                │
-  executor.ts: fresh re-quote of every leg + on-chain floor                               │
+  executor.py: fresh re-quote of every leg + on-chain floor                               │
      paper quote-only │ paper simulate (public key) │ micro/live: simulate, sign, Jito      │
                          ▼                                                                │
-  funnel.ts (opps-<mode>.jsonl) · ledger.ts (trades-<mode>.jsonl) · brain.ts · status.json┘
+  funnel.py (opps-<mode>.jsonl) · ledger.py (trades-<mode>.jsonl) · brain.py · status.json┘
 ```
 
 ## Modules
 
+All modules live in `arbbot/`.
+
 | File | Role |
 |---|---|
-| `index.ts` | Main loop: scheduling, bookkeeping, risk, scanning, execution, status. |
-| `config.ts` | All settings from `.env`, with validation; modes `paper`/`micro`/`live`. |
-| `secrets.ts`, `log.ts` | Startup secret checks (seed phrases, keys in the wrong slot); redaction of every printed line. |
-| `jupiter.ts` | Jupiter quote and swap-instructions client (`x-api-key` header). |
-| `budget.ts` | Sliding-window request counter (60 s and 10 s windows). |
-| `http.ts` | Fetch with a 15 s timeout for every service. |
-| `cycle.ts` | Cycle specs (two-leg, triangle) and quoting every leg back to back. |
-| `triangles.ts` | Triangles through a pivot (SOL) and their rotation. |
-| `costs.ts` | Cost model: base fee, priority fee, dynamic Jito tip, safety buffer. |
-| `scanner.ts` | Quotes cycles one after another, values them, stops early on a candidate. |
-| `stats.ts` | Learning engine V2: Bayesian success rates per stage, token and route; EV; score. |
-| `sizer.ts` | Size ladder: which sizes to try, best expected value. |
-| `executor.ts` | Fresh re-quote, floor, one-transaction build, simulate, send, landing. |
-| `jito.ts` | Jito block engine client (`bundleOnly` single-transaction bundles). |
-| `funnel.ts` | Opportunity IDs and one structured record per acted-on candidate. |
-| `ledger.ts` | Trade log with a basis on every amount: quoted, simulated, realized. |
-| `brain.ts` | Older EWMA learner: pacing, focus/hot tokens, size buckets, haircut, thoughts. |
-| `risk.ts`, `killswitch.ts`, `gate.ts` | Loss guards, emergency stop, go-live gate. |
-| `tokensafety.ts`, `discovery.ts` | Token states from mint accounts and Jupiter's token list. |
-| `poolwatch.ts` | WebSocket pool subscriptions with caps (event triggers). |
-| `status.ts`, `status-file.ts`, `server.ts` | Status screen data/rendering, `status.json`, optional HTTP status page. |
-| `report.ts`, `report-cli.ts`, `backtest.ts`, `benchmark.ts`, `check.ts` | The other commands. |
-| `atomic.ts`, `tail.ts` | Crash-safe JSON writes, reading the end of a file. |
+| `__main__.py` | The commands: `python3 -m arbbot start/paper/micro/check/status/watch/report/backtest/benchmark/stop-trading/enable-trading`. |
+| `engine.py` | Main loop: scheduling, bookkeeping, risk, scanning, execution, status, watchdog. |
+| `config.py` | All settings from `.env`, with validation; modes `paper`/`micro`/`live`. |
+| `secret_checks.py`, `log.py` | Startup secret checks (seed phrases, keys in the wrong slot); redaction of every printed line. |
+| `solana/` | Plain-Python Solana: base58, Ed25519 signing, keys and token-account addresses, v0 transactions with lookup tables (byte-identical to web3.js), JSON-RPC and WebSocket clients. |
+| `jupiter.py` | Jupiter quote and swap-instructions client (`x-api-key` header). |
+| `budget.py` | Sliding-window request counter (60 s and 10 s windows). |
+| `http.py` | One shared HTTP client with a 15 s timeout for every service. |
+| `cycle.py` | Cycle specs (two-leg, triangle) and quoting every leg back to back. |
+| `triangles.py` | Triangles through a pivot (SOL) and their rotation. |
+| `costs.py`, `profit.py` | Cost model: base fee, priority fee, dynamic Jito tip, safety buffer; the on-chain floor maths. |
+| `scanner.py` | Quotes cycles one after another, values them, stops early on a candidate. |
+| `stats.py` | Learning engine V2: Bayesian success rates per stage, token and route; EV; score. |
+| `sizer.py` | Size ladder: which sizes to try, best expected value. |
+| `executor.py` | Fresh re-quote, floor, one-transaction build, simulate, send, landing. |
+| `jito.py` | Jito block engine client (`bundleOnly` single-transaction bundles). |
+| `wallet.py` | Keypair loading, balances, the balance cache. |
+| `funnel.py` | Opportunity IDs and one structured record per acted-on candidate. |
+| `ledger.py` | Trade log with a basis on every amount: quoted, simulated, realized. |
+| `brain.py` | Older EWMA learner: pacing, focus/hot tokens, size buckets, haircut, thoughts. |
+| `probes.py` | Probes (paper re-checks of gaps below the bar) and the gap memory. |
+| `risk.py`, `killswitch.py`, `gate.py`, `sustain.py` | Loss guards, emergency stop, go-live gate, "did it pay its bills". |
+| `tokensafety.py`, `discovery.py` | Token states from mint accounts and Jupiter's token list. |
+| `poolwatch.py` | WebSocket pool subscriptions with caps (event triggers). |
+| `status.py`, `status_file.py`, `server.py` | Status screen data/rendering, `status.json`, optional HTTP status page. |
+| `report.py`, `backtest.py`, `benchmark.py`, `check.py`, `control.py`, `notify.py` | The other commands and Telegram alerts. |
+| `atomic.py`, `jsonl.py`, `tail.py`, `util.py` | Crash-safe JSON writes, JSON-lines files, reading the end of a file, time helpers. |
+
+Data files keep the field names (camelCase) of the earlier TypeScript version,
+so a phone's existing `data/` folder carries over unchanged.
 
 ## Files in `data/`
 
@@ -85,8 +94,8 @@ the size ladder only uses requests that are free right now.
 
 ## Engine and dashboard split
 
-`status.ts` separates gathering (plain JSON, `gatherStatus`) from rendering,
-and `server.ts` serves that JSON. `npm run watch` shows either the local data
+`status.py` separates gathering (plain JSON, `gather_status`) from rendering,
+and `server.py` serves that JSON. `npm run watch` shows either the local data
 folder or a remote engine (`ENGINE_URL`, `ENGINE_TOKEN`). Moving the engine to
 a server later needs no code change: copy `.env`, run `npm start` there, and
 point `ENGINE_URL` at it.

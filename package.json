@@ -1,36 +1,20 @@
 {
   "name": "solana-arb-bot",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "type": "module",
-  "description": "Small self-accounting Solana DEX arbitrage bot (paper mode by default)",
+  "description": "Small self-accounting Solana DEX arbitrage bot (paper mode by default). Written in Python; these scripts are shortcuts for `python3 -m arbbot <command>`.",
   "scripts": {
-    "start": "tsx src/index.ts",
-    "paper": "MODE=paper tsx src/index.ts",
-    "micro": "MODE=micro tsx src/index.ts",
-    "check": "tsx src/check.ts",
-    "status": "tsx src/status.ts",
-    "watch": "tsx src/status.ts --watch",
-    "stop-trading": "tsx src/control.ts stop",
-    "enable-trading": "tsx src/control.ts enable",
-    "report": "tsx src/report-cli.ts",
-    "benchmark": "tsx src/benchmark.ts",
-    "backtest": "tsx src/backtest.ts",
-    "typecheck": "tsc --noEmit",
-    "test": "vitest run"
-  },
-  "engines": {
-    "node": ">=20"
-  },
-  "dependencies": {
-    "@solana/web3.js": "^1.98.0",
-    "bs58": "^6.0.0",
-    "dotenv": "^16.4.5"
-  },
-  "devDependencies": {
-    "@types/node": "^22.0.0",
-    "tsx": "^4.19.0",
-    "typescript": "^5.6.0",
-    "vitest": "^2.1.0"
+    "start": "python3 -m arbbot start",
+    "paper": "python3 -m arbbot paper",
+    "micro": "python3 -m arbbot micro",
+    "check": "python3 -m arbbot check",
+    "status": "python3 -m arbbot status",
+    "watch": "python3 -m arbbot watch",
+    "stop-trading": "python3 -m arbbot stop-trading",
+    "enable-trading": "python3 -m arbbot enable-trading",
+    "report": "python3 -m arbbot report",
+    "benchmark": "python3 -m arbbot benchmark",
+    "backtest": "python3 -m arbbot backtest",
+    "test": "python3 -m pytest -q tests"
   }
 }

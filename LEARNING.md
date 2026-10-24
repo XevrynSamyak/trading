@@ -4,7 +4,7 @@ The bot learns from what actually happened, never from quotes alone. There
 are two learners. Neither calls an AI service: that would be too slow for
 arbitrage and would cost money.
 
-## 1. Learning engine V2 (`stats.ts`): chances of success
+## 1. Learning engine V2 (`stats.py`): chances of success
 
 The source of truth is the opportunity funnel, `data/opps-<mode>.jsonl`: one
 record per acted-on candidate, saying how far it got:
@@ -55,7 +55,7 @@ fails costs its network fee.
 
 A negative EV stays negative and is never chosen.
 
-## 2. The brain (`brain.ts`): pace, focus and thresholds
+## 2. The brain (`brain.py`): pace, focus and thresholds
 
 An older, faster-moving learner (EWMA statistics in `data/brain-<mode>.json`,
 saved atomically with a `.bak` copy):
@@ -70,7 +70,7 @@ saved atomically with a `.bak` copy):
 | Pace | The fastest safe spacing per Jupiter request; slows down on "too many requests" and speeds up after clean scans. |
 | Thoughts | Plain-language explanations in `status` and `report`. |
 
-## 3. Probes and gap memory (`probes.ts`)
+## 3. Probes and gap memory (`probes.py`)
 
 Only gaps above the bar get re-checked as candidates, which is a few a day.
 So in paper mode the bot also **probes**: when a scan sees a positive gap

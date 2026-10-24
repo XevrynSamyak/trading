@@ -1,5 +1,10 @@
 # Audit: Solana arbitrage bot (V1)
 
+> Written for the earlier TypeScript version. The bot now runs in Python with the same
+> behaviour: `src/<name>.ts` is now `arbbot/<name>.py` (`index.ts` → `engine.py`,
+> `secrets.ts` → `secret_checks.py`, `status-file.ts` → `status_file.py`), and every
+> `npm run` command still works.
+
 Audited at commit `a9e42e4` on 2026-10-05. Nothing was changed during the audit.
 Test suite at audit time: **14 files, 79 tests, all passing** (`npm test`).
 

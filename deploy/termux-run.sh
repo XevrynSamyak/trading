@@ -8,7 +8,7 @@ set -u
 cd "$(dirname "$0")/.." || exit 1
 mkdir -p data
 LOG=data/bot.log
-BOT_CMD=${BOT_CMD:-"npx tsx src/index.ts"}
+BOT_CMD=${BOT_CMD:-"python3 -m arbbot start"}
 RESTART_DELAY=${RESTART_DELAY:-30}
 
 # Only one copy may run: two would corrupt the trade log and the brain file.

@@ -1,5 +1,10 @@
 # V2 final report
 
+> Written for the earlier TypeScript version. The bot now runs in Python with the same
+> behaviour: `src/<name>.ts` is now `arbbot/<name>.py` (`index.ts` → `engine.py`,
+> `secrets.ts` → `secret_checks.py`, `status-file.ts` → `status_file.py`), and every
+> `npm run` command still works.
+
 Branch `claude/keen-ptolemy-y8ns0k`. Audit (AUDIT.md), then steps A–J, each
 committed separately with its tests. At the end: **25 test files, 172 tests,
 all passing** (79 at the audit).

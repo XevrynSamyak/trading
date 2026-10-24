@@ -5,7 +5,7 @@ cost.
 
 ## 1. Detect
 
-A scan quotes each chosen cycle leg by leg (`cycle.ts`): leg 1 sells the
+A scan quotes each chosen cycle leg by leg (`cycle.py`): leg 1 sells the
 input, every next leg sells exactly what the previous one bought. Quotes use
 0 slippage, `restrictIntermediateTokens`, and at most `floor(56 / legs)`
 route accounts per leg so all legs fit in one v0 transaction.
@@ -15,13 +15,13 @@ brain's picks (hot and promising tokens first, plus exploration), and every
 `TRIANGLE_EVERY`-th full scan, two triangles through SOL.
 
 Before each cycle the scan waits until its quotes **and** an immediate
-execution fit in the request budget (`budget.ts`), so a gap found is never
+execution fit in the request budget (`budget.py`), so a gap found is never
 left waiting seconds for room. The scan stops at the first cycle worth
 acting on.
 
 ## 2. Decide
 
-Each cycle is valued after costs (`costs.ts`):
+Each cycle is valued after costs (`costs.py`):
 
 ```
 net = quoted out − in − (base fee + priority fee + Jito tip + safety buffer)
@@ -42,7 +42,7 @@ A cycle is acted on only if all of these hold:
 
 ## 3. Size
 
-The size ladder (`sizer.ts`) quotes a few sizes from `SIZE_LADDER_USD` within
+The size ladder (`sizer.py`) quotes a few sizes from `SIZE_LADDER_USD` within
 every limit (wallet × `MAX_EXPOSURE_PCT`, `MAX_TRADE_USD`, the MICRO cap),
 reusing the size already quoted, and keeps the one with the best expected
 value whose impact is acceptable. It only uses requests that are free right

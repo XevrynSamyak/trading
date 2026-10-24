@@ -207,10 +207,10 @@ the running bot stops trading within seconds and waits). Only
 
 **On an Android phone (free):** follow `deploy/ANDROID.md`.
 
-On any computer with Node 20+:
+On any computer with Python 3.10+:
 
 ```bash
-npm install
+pip install -r requirements.txt
 cp .env.example .env     # edit it
 npm start                # paper mode by default (or: npm run paper)
 npm run status           # is it running, what it's doing, test progress
@@ -219,8 +219,14 @@ npm run report           # quoted vs simulated vs realized, risk, go-live verdic
 npm run benchmark        # measured latency to RPC, Jupiter, Jito, WebSocket
 npm run backtest         # replay recorded opportunities under stricter rules
 npm run stop-trading     # emergency stop; npm run enable-trading lifts it
-npm test
+npm test                 # needs: pip install -r requirements-dev.txt
 ```
+
+The bot is written in Python (`arbbot/`). Every `npm run <command>` is only a
+shortcut for `python3 -m arbbot <command>` (e.g. `python3 -m arbbot status`),
+so Node is optional. Its only dependencies are `httpx` and `websockets`; the
+Solana parts (keys, signing, transactions) are plain Python, checked
+byte-for-byte against `@solana/web3.js` in the tests.
 
 ### Going live
 
