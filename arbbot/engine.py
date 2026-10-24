@@ -30,6 +30,7 @@ from .ledger import Ledger, basis_of, money_basis
 from .log import log
 from .notify import make_notifier
 from .poolwatch import PoolWatcher, RpcSubscriber, WatchOptions
+from .pricewatch import fetch_prices, requests_needed
 from .probes import GapMemory, ProbeBudget, ProbeLog, held, probe_from_opp, venues_of
 from .profit import usd_to_usdc_atoms
 from .report import build_report_data, render_report
@@ -73,6 +74,10 @@ TRIANGLES_PER_SCAN = 2
 
 class _Halt(Exception):
     """The bot halts for good (data/HALTED); exit code 0 so the runner stops too."""
+
+
+class _Preempted(Exception):
+    """A pool changed during a routine scan: skip the rest of it and quote that token now."""
 
 
 def _lan_addresses(host: str) -> list[str]:
@@ -346,6 +351,9 @@ class Engine:
         last_month = start_of_utc_month(now_ms())
         warned_unfunded = False
         kill_switch_on = False
+        price_watch_at = 0
+        price_failures = 0
+        watched_prices = 0
         last_opp: dict | None = None
 
         # Live progress for `status`.
@@ -534,13 +542,42 @@ class Engine:
                     log.warn(why)
                     await self.sleep(cfg.scan_interval_ms * 4)
                     continue
+                # Price watch: one request checks every token's price; a token that jumped gets
+                # focus scans (round-trip quotes) first. It only says where to look: a single
+                # price can't show a gap between exchanges.
+                if cfg.price_watch and now - price_watch_at >= cfg.price_watch_ms:
+                    price_watch_at = now
+                    try:
+                        await wait_for_jupiter(requests_needed(len(scannable)))
+                        prices = await fetch_prices(http, cfg.jupiter_price_api, list(scannable.values()),
+                                                    cfg.jupiter_api_key, budget.record)
+                        watched_prices = len(prices)
+                        price_failures = 0
+                        t = now_ms()
+                        moved = []
+                        for sym, mint in scannable.items():
+                            if mint not in prices:
+                                continue
+                            was_hot = brain.is_hot(sym, t)
+                            move = brain.observe_market_price(sym, prices[mint], t)
+                            if move is not None and not was_hot and brain.is_hot(sym, t):
+                                moved.append(f"{sym} {to_fixed(move, 0)}bps")
+                        if moved:
+                            log.event(f"moving fast (price watch): {', '.join(moved)}; checking them first")
+                    except Exception as err:  # noqa: BLE001 - scans go on without it
+                        if " 429" in str(err):
+                            rate_limited = True
+                        price_failures += 1
+                        if price_failures in (1, 10) or price_failures % 100 == 0:
+                            log.warn(f"price watch failed {price_failures}x (scans go on as before): {str(err)[:120]}")
                 # A pool just changed: quote those tokens now, while any gap is fresh
                 # (with a full scan every few turns so nothing else is ignored).
                 dirty = [(s, ts) for s, ts in (watcher.take_dirty() if watcher else []) if s in scannable]
                 market_ts: dict[str, float] = {}
                 tokens: dict[str, str] = {}
                 triangles = []
-                if dirty and event_scans < MAX_EVENT_SCANS_IN_A_ROW:
+                routine_scan = not (dirty and event_scans < MAX_EVENT_SCANS_IN_A_ROW)
+                if not routine_scan:
                     event_scans += 1
                     tokens = {s: scannable[s] for s, _ in dirty[:EVENT_SCAN_TOKENS]}
                     for s, ts in dirty[EVENT_SCAN_TOKENS:]:
@@ -610,20 +647,44 @@ class Engine:
 
                 def on_error(spec, err) -> None:
                     nonlocal rate_limited
-                    if not self.running:
-                        return  # stopping: skip the remaining quotes quietly
+                    if not self.running or isinstance(err, _Preempted):
+                        return  # stopping, or a pool changed: skip the remaining quotes quietly
                     if " 429" in str(err):
                         rate_limited = True
                     log.warn(f"quote {spec.symbol} failed: {str(err)[:120]}")
+
+                scan_started_at = now_ms()
+                quoted_in_scan = 0
+
+                def preempt(spec) -> None:
+                    # A pool changed since this routine scan began: its token is quoted next,
+                    # instead of after the rest of this scan (each token here waits for budget).
+                    # The first token of a scan always goes ahead, so routine scans still progress.
+                    others = {s: m for s, m in scannable.items() if s != spec.symbol}
+                    if routine_scan and quoted_in_scan and watcher and watcher.pending(others, since=scan_started_at):
+                        raise _Preempted()
+
+                def market_ts_for(spec):
+                    # Quoting a token whose pool just changed handles that change: record when it
+                    # happened, and don't quote it again in a separate event scan.
+                    if spec.symbol not in market_ts and watcher and spec.kind == "two-leg":
+                        ts = watcher.take(spec.symbol)
+                        if ts is not None:
+                            market_ts[spec.symbol] = ts
+                    return market_ts.get(spec.symbol)
 
                 async def before_each(spec) -> None:
                     # Each leg costs 1 request. Wait until the cycle fits in every rate window AND
                     # enough room stays free to execute a gap at once (re-quote, and build when
                     # testing on-chain): a gap found but executed seconds later is gone.
+                    nonlocal quoted_in_scan
+                    preempt(spec)
                     legs = len(spec.path) - 1
                     await wait_for_jupiter(legs + (legs * 2 if with_wallet else legs))
                     if not self.running:
                         raise RuntimeError("stopping")
+                    preempt(spec)
+                    quoted_in_scan += 1
 
                 def stop_after(x) -> bool:
                     # Gaps last moments: act on the first one worth it instead of quoting the rest first.
@@ -640,7 +701,7 @@ class Engine:
                 scored = await scan_cycles(
                     jup, specs, size_for, sol_price, costs,
                     on_error=on_error, before_each=before_each,
-                    market_ts_for=lambda spec: market_ts.get(spec.symbol), stop_after=stop_after,
+                    market_ts_for=market_ts_for, stop_after=stop_after,
                 )
                 for x in scored:
                     last_pools[x.cycle.symbol] = x.cycle.pools
@@ -848,6 +909,10 @@ class Engine:
                 if rate_limited:
                     next_wait_ms = max(next_wait_ms, RATE_LIMIT_BACKOFF_MS)
                     log.warn(f"Jupiter says too many requests; slowing down (safe pace now {js_str(brain.pace_floor_ms / 1000)}s)")
+                elif watcher and watcher.pending(scannable):
+                    # A pool changed while this scan ran: don't sleep on it (the request budget
+                    # still decides when the quotes can go out).
+                    next_wait_ms = cfg.min_scan_interval_ms
                 ws_stats = watcher.stats() if watcher else None
                 publish(
                     state="scanning",
@@ -874,6 +939,7 @@ class Engine:
                         "tooBusy": ws_stats.too_busy, "cap": cfg.event_daily_cap,
                     } if ws_stats else None,
                     quoteMs=js_round(quote_ms_avg) if quote_ms_avg is not None else None,
+                    priceWatch={"tokens": watched_prices, "everyMs": cfg.price_watch_ms} if cfg.price_watch else None,
                     lastBest={
                         "symbol": best[0].cycle.symbol,
                         "netBps": best[0].val.net_bps,

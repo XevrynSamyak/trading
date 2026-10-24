@@ -19,6 +19,11 @@ FLAT = Keypair.generate().public_key
 
 def handler(seen: list):
     def handle(req: httpx.Request) -> httpx.Response:
+        if req.url.host == "jup.mock" and req.url.path.endswith("/price/v3"):
+            seen.append(("price",))
+            n = sum(1 for x in seen if x[0] == "price")
+            # FLAT's price jumps 1% on every poll; GAP's stays put.
+            return httpx.Response(200, json={GAP: {"usdPrice": 2.0}, FLAT: {"usdPrice": 1.0 * 1.01 ** n}})
         if req.url.host == "jup.mock":
             p = req.url.params
             amount = int(p["amount"])
@@ -48,10 +53,12 @@ def config(tmp_path, **extra):
     env = {
         "DATA_DIR": str(tmp_path), "TOKENS": f"GAP:{GAP},FLAT:{FLAT}", "TOKEN_DISCOVERY": "off", "EVENT_TRIGGERS": "off",
         "TRIANGLES": "off", "SCAN_INTERVAL_MS": "10", "MIN_SCAN_INTERVAL_MS": "10", "JUPITER_RPM": "6000",
-        "JUPITER_API": "https://jup.mock/swap/v1", "RPC_URL": "https://rpc.mock",
+        "JUPITER_API": "https://jup.mock/swap/v1", "JUPITER_PRICE_API": "https://jup.mock/price/v3", "RPC_URL": "https://rpc.mock",
     }
     env.update(extra)
-    return load_config(env)
+    cfg = load_config(env)
+    cfg.price_watch_ms = 50
+    return cfg
 
 
 def run_engine(cfg, monkeypatch, until, timeout_s=10.0):
@@ -142,3 +149,18 @@ def test_stop_cuts_sleep_short():
 
 def config_for_sleep():
     return load_config({"DATA_DIR": "/nonexistent-unused"})
+
+
+def test_price_watch_points_scans_at_movers(tmp_path, monkeypatch):
+    cfg = config(tmp_path, MIN_PROFIT_BPS="500")  # nothing acted on: just watch and scan
+    brain_path = tmp_path / "brain-paper.json"
+
+    def flat_hot():
+        return brain_path.exists() and (json.load(open(brain_path)).get("lastHot") or {}).get("symbol") == "FLAT"
+
+    code, seen = run_engine(cfg, monkeypatch, flat_hot)
+    assert code == 0
+    assert flat_hot()
+    assert sum(1 for s in seen if s[0] == "price") >= 2
+    status = json.load(open(tmp_path / "status.json"))
+    assert status["priceWatch"]["tokens"] == 2

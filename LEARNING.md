@@ -66,7 +66,7 @@ saved atomically with a `.bak` copy):
 | Haircut | Per token, how much quotes overstated on-chain results (EWMA). Quotes are discounted by it before deciding. |
 | Token choice | Scans favour tokens with better recent edges, with 20 % exploration. Discovered tokens that stay below −30 bps for 50 scans are dropped. |
 | Size buckets | Per token, which share of the maximum size (25/50/100 %) did best. |
-| Hot tokens | A price move of 30 bps or more between scans, or a gap within 5 bps of the bar, gives the token focus scans for a while. |
+| Hot tokens | A price move of 30 bps or more between scans or between two price-watch checks (one cheap request covers every token), or a gap within 5 bps of the bar, gives the token focus scans for a while. |
 | Pace | The fastest safe spacing per Jupiter request; slows down on "too many requests" and speeds up after clean scans. |
 | Thoughts | Plain-language explanations in `status` and `report`. |
 

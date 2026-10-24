@@ -56,6 +56,7 @@ All modules live in `arbbot/`.
 | `risk.py`, `killswitch.py`, `gate.py`, `sustain.py` | Loss guards, emergency stop, go-live gate, "did it pay its bills". |
 | `tokensafety.py`, `discovery.py` | Token states from mint accounts and Jupiter's token list. |
 | `poolwatch.py` | WebSocket pool subscriptions with caps (event triggers). |
+| `pricewatch.py` | Jupiter price API: every known token's price in one request, to spot movers. |
 | `status.py`, `status_file.py`, `server.py` | Status screen data/rendering, `status.json`, optional HTTP status page. |
 | `report.py`, `backtest.py`, `benchmark.py`, `check.py`, `control.py`, `notify.py` | The other commands and Telegram alerts. |
 | `atomic.py`, `jsonl.py`, `tail.py`, `util.py` | Crash-safe JSON writes, JSON-lines files, reading the end of a file, time helpers. |

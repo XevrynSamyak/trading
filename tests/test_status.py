@@ -91,6 +91,7 @@ def test_pause_reason_and_extras():
     assert "Speed:   7 scans in the last minute  (Jupiter: 41/60 requests used per minute)" in text
     assert "Events:  watching 3 pool(s), 12,345 / 60,000 updates today  (1 too-busy pool(s) resting)" in text
     assert "Focus:   WIF" in text
+    assert "Prices:  watching 28 tokens every 15s" in render(live=live(priceWatch={"tokens": 28, "everyMs": 15_000}))
     assert "Funnel:  quoted 4 → executable 1 → simulated 0" in text
     assert 'Latest:  opp_1 WIF quoted 22.0bps → fresh -3.1bps → stale at "quoted" (812 ms)' in text
 

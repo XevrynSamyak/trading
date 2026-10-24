@@ -263,8 +263,14 @@ class Brain:
         impact doesn't fake a move). A sharp move marks it hot for a while:
         that is when gaps between exchanges tend to open.
         """
+        return self._observe_move(f"{symbol}:{bucket_key(bucket)}", symbol, rate, now)
+
+    def observe_market_price(self, symbol: str, usd_price: float, now: float | None = None) -> float | None:
+        """The same, from the price watch (one cheap request covers many tokens)."""
+        return self._observe_move(f"{symbol}:usd", symbol, usd_price, now)
+
+    def _observe_move(self, key: str, symbol: str, rate: float, now: float | None) -> float | None:
         now = self._now() if now is None else now
-        key = f"{symbol}:{bucket_key(bucket)}"
         prev = self._last_rate.get(key)
         self._last_rate[key] = (rate, now)
         if not prev or prev[0] <= 0 or now - prev[1] > HOT_WINDOW_MS:

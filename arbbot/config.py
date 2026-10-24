@@ -190,6 +190,9 @@ class Config:
     probes: bool
     probe_min_bps: float
     probes_per_hour: int
+    price_watch: bool
+    price_watch_ms: int
+    jupiter_price_api: str
     status_http_port: int | None
     status_http_host: str
     status_http_token: str | None
@@ -276,14 +279,14 @@ def load_config(env: dict | None = None) -> Config:
         sustain_stop_after_months=int(n("SUSTAIN_STOP_AFTER_MONTHS", 2)),
         token_discovery=env.get("TOKEN_DISCOVERY") != "off",
         jupiter_tokens_api=_jupiter_url(env.get("JUPITER_TOKENS_API"), "/tokens/v2", key),
-        max_tokens=int(n("MAX_TOKENS", 12)),
+        max_tokens=int(n("MAX_TOKENS", 30)),
         min_token_liquidity_usd=n("MIN_TOKEN_LIQUIDITY_USD", 1_000_000),
         min_token_holders=int(n("MIN_TOKEN_HOLDERS", 1_000)),
         min_pool_age_days=n("MIN_POOL_AGE_DAYS", 7),
         max_top_holders_pct=n("MAX_TOP_HOLDERS_PCT", 60),
         live_tokens=[x.strip() for x in (env.get("LIVE_TOKENS") or "").split(",") if x.strip()],
         event_triggers=env.get("EVENT_TRIGGERS") != "off",
-        max_watched_pools=int(n("MAX_WATCHED_POOLS", 4)),
+        max_watched_pools=int(n("MAX_WATCHED_POOLS", 8)),
         event_daily_cap=int(n("EVENT_DAILY_CAP", 20_000)),
         event_debounce_ms=int(n("EVENT_DEBOUNCE_MS", 1_500)),
         busy_pool_per_min=int(n("BUSY_POOL_EVENTS_PER_MIN", 30)),
@@ -293,6 +296,11 @@ def load_config(env: dict | None = None) -> Config:
         probes=env.get("PROBES") != "off",
         probe_min_bps=n("PROBE_MIN_BPS", 0),
         probes_per_hour=max(0, int(n("PROBES_PER_HOUR", 30))),
+        # One price request covers up to 50 tokens, so every known token is watched for a
+        # few requests a minute; tokens that jump get full round-trip quotes first.
+        price_watch=env.get("PRICE_WATCH") != "off",
+        price_watch_ms=max(5_000, int(n("PRICE_WATCH_MS", 15_000))),
+        jupiter_price_api=_jupiter_url(env.get("JUPITER_PRICE_API"), "/price/v3", key),
         status_http_port=int(n("STATUS_HTTP_PORT", 0)) if env.get("STATUS_HTTP_PORT") else None,
         status_http_host=env.get("STATUS_HTTP_HOST") or "127.0.0.1",
         status_http_token=env.get("STATUS_HTTP_TOKEN") or None,

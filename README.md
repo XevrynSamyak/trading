@@ -135,7 +135,15 @@ numbers.
 
 When a token is moving fast or a gap is nearly big enough, the bot switches
 to **focus scans** of just that token (2 requests), with a full scan every
-third time so nothing else is ignored. Wallet balances (Helius) are read at
+third time so nothing else is ignored.
+
+To cover more tokens without more requests, a **price watch** asks Jupiter for
+the price of every token it knows (up to 50 in one request) every 15 seconds
+(`PRICE_WATCH_MS`), about 4 requests a minute. A token whose price jumps gets
+focus scans first. A single price can't show a gap between exchanges; it only
+says where to look. With it, the bot keeps up to 30 tokens (`MAX_TOKENS`) and
+watches up to 8 pools (`MAX_WATCHED_POOLS`). A pool change during a routine
+scan skips the rest of that scan, so the changed token is quoted next. Wallet balances (Helius) are read at
 most once a minute to stay well inside the free RPC plan.
 
 ## Triangles and backtesting

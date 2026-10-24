@@ -144,6 +144,9 @@ def render_status(i: dict, now: int, color: bool) -> str:
                 f"Events:  {watching}, {_thousands(e.get('eventsToday', 0))} / {_thousands(e.get('cap', 0))} updates today"
                 + (dim(f"  ({e['tooBusy']} too-busy pool(s) resting)") if e.get("tooBusy") else "")
             )
+        pw = live.get("priceWatch")
+        if pw and pw.get("tokens"):
+            out.append(f"Prices:  watching {pw['tokens']} tokens every {duration(pw['everyMs'])} " + dim("(1 request; movers get quoted first)"))
         if live.get("focus"):
             out.append(f"Focus:   {yellow(', '.join(live['focus']))} {dim('(re-checking just this every few seconds)')}")
         f = live.get("funnelToday")

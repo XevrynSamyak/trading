@@ -197,6 +197,16 @@ class PoolWatcher:
         self._dirty.clear()
         return out
 
+    def pending(self, symbols=None, since: float | None = None) -> bool:
+        """Dirty tokens waiting (among `symbols`, marked after `since`), without taking them."""
+        return any(
+            (symbols is None or sym in symbols) and (since is None or ts > since) for sym, ts in self._dirty.items()
+        )
+
+    def take(self, symbol: str) -> float | None:
+        """Takes one dirty token (when a scan is quoting it anyway); returns when its pool changed."""
+        return self._dirty.pop(symbol, None)
+
     def remark(self, symbol: str, ts: float) -> None:
         """Put a dirty token back (e.g. it could not be quoted this time)."""
         self._dirty.setdefault(symbol, ts)
