@@ -304,3 +304,40 @@ def test_survives_a_corrupted_file(path):
         f.write("garbage")
     fresh = Brain(path, 20)
     assert fresh.min_profit_bps == 20 and not fresh.restored_from_backup
+
+
+def test_when_every_size_loses_it_scans_at_the_size_with_the_best_edge(path):
+    b = Brain(path, 20, explore_rate=0)
+    # Fixed costs make $5 look worse in bps but "lose fewer dollars" than $20.
+    for _ in range(5):
+        b.observe_scan("SOL", -12.0, -0.006, 0.25, 0)
+        b.observe_scan("SOL", -9.0, -0.009, 0.5, 0)
+        b.observe_scan("SOL", -6.0, -0.012, 1, 0)
+    assert b.pick_size("SOL", 20) == (20, 1)
+    assert "best size 100%" in b.summary()
+    # Once a size makes money, the most dollars wins.
+    for _ in range(10):
+        b.observe_scan("SOL", 30.0, 0.03, 0.5, 0)
+    assert b.pick_size("SOL", 20) == (10, 0.5)
+
+
+def test_old_size_stats_without_bps_still_work(path):
+    import json
+    with open(path, "w") as f:
+        json.dump({"tokens": {"A": {"scans": 9, "avgEdgeBps": -3, "fills": 0, "failures": 0, "pnlUsd": 0,
+                                    "sizes": {"1": {"n": 3, "avgNetUsd": -0.01}, "0.25": {"n": 3, "avgNetUsd": -0.002},
+                                              "0.5": {"n": 3, "avgNetUsd": -0.004}}}}}, f)
+    b = Brain(path, 20, explore_rate=0)
+    assert b.pick_size("A", 20)[1] == 0.25  # no bps yet: falls back to dollars
+    b.observe_scan("A", -2.0, -0.004, 1, 0)
+    assert b.state["tokens"]["A"]["sizes"]["1"]["avgNetBps"] == -2.0
+
+
+def test_a_bonus_favours_tokens_whose_gaps_are_real(path):
+    b = Brain(path, 20, tokens_per_cycle=1, explore_rate=0)
+    for _ in range(20):
+        b.observe_scan("A", -5)
+        b.observe_scan("B", -6)
+    assert b.rank_tokens(["A", "B"])[0] == "A"
+    assert b.rank_tokens(["A", "B"], {"B": 5, "A": -5})[0] == "B"
+    assert list(b.pick_tokens({"A": "a", "B": "b"}, bonus={"B": 5})) == ["B"]

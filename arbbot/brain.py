@@ -82,12 +82,6 @@ def bucket_key(bucket: float) -> str:
     return js_str(float(bucket))
 
 
-def _js_entries(d: dict) -> list[tuple[str, dict]]:
-    """Object.entries order: integer-like keys ascending first, then the rest as inserted."""
-    ints = sorted((k for k in d if k.isdigit() and (k == "0" or not k.startswith("0"))), key=int)
-    return [(k, d[k]) for k in ints] + [(k, v) for k, v in d.items() if k not in ints]
-
-
 def _fmt_time(ms: float) -> str:
     return iso(int(ms))[5:16].replace("T", " ") + " UTC"
 
@@ -188,9 +182,10 @@ class Brain:
 
     # ---- which tokens ------------------------------------------------------
 
-    def rank_tokens(self, symbols) -> list[str]:
+    def rank_tokens(self, symbols, bonus: dict[str, float] | None = None) -> list[str]:
         """Symbols, most promising first (the same order scans use)."""
-        return sorted(symbols, key=lambda s: -self.score(s))
+        bonus = bonus or {}
+        return sorted(symbols, key=lambda s: -(self.score(s) + bonus.get(s, 0.0)))
 
     def forget_token(self, symbol: str) -> bool:
         """Drops a discovered token (e.g. one the safety check blocked). True if it was there."""
@@ -233,17 +228,19 @@ class Brain:
         reliability = (s["fills"] + 0.5) / (tries + 1) if tries > 0 else 0.5
         return s["avgEdgeBps"] + curiosity + 10 * reliability
 
-    def pick_tokens(self, all_tokens: dict[str, str], now: float | None = None) -> dict[str, str]:
+    def pick_tokens(self, all_tokens: dict[str, str], now: float | None = None,
+                    bonus: dict[str, float] | None = None) -> dict[str, str]:
         """
         Picks which tokens to scan this cycle. While a token is hot (sudden
         move, or a gap nearly big enough) it gets focus scans of just itself,
         which cost a third of the requests and so can run about 3x as often;
-        every third scan is a full one so nothing else is ignored.
+        every third scan is a full one so nothing else is ignored. `bonus`
+        (bps-like points per token) favours tokens whose gaps tend to be real.
         """
         now = self._now() if now is None else now
         symbols = list(all_tokens)
         n = min(self.tokens_per_cycle, len(symbols))
-        ranked = self.rank_tokens(symbols)
+        ranked = self.rank_tokens(symbols, bonus)
         hot = [s for s in ranked if self.is_hot(s, now)]
         if hot and self._focus_turns < FOCUS_TURNS:
             self._focus_turns += 1
@@ -320,11 +317,28 @@ class Brain:
 
     # ---- what size ---------------------------------------------------------
 
+    @staticmethod
+    def _best_bucket(sizes: dict) -> float:
+        """
+        The size that has done best. If one has made money, the one making the
+        most dollars. If none has (the usual case), the one with the best edge
+        in bps: the smallest size always "loses the fewest dollars", but its
+        fixed costs (network fee, buffer) take a bigger share and hide gaps a
+        bigger size would show.
+        """
+        stats = [(b, sizes[bucket_key(b)]) for b in SIZE_BUCKETS if bucket_key(b) in sizes]
+        if not stats:
+            return 1
+        best_usd = max(stats, key=lambda e: e[1]["avgNetUsd"])
+        if best_usd[1]["avgNetUsd"] > 0:
+            return best_usd[0]
+        return max(stats, key=lambda e: e[1].get("avgNetBps", e[1]["avgNetUsd"]))[0]
+
     def pick_size(self, symbol: str, max_usd: float) -> tuple[float, float]:
         """
         (usd, bucket): how much of `max_usd` to trade for this token. Smaller
-        trades move the price less (better %), bigger ones make more per win;
-        it learns which nets the most dollars per token.
+        trades move the price less (better %), bigger ones make more per win
+        and spread the fixed costs; it learns which size works per token.
         """
         sizes = self._stats(symbol)["sizes"]
         bucket = next((b for b in SIZE_BUCKETS if sizes.get(bucket_key(b), {}).get("n", 0) < SIZE_WARMUP), None)
@@ -332,7 +346,7 @@ class Brain:
             if self.random() < self.explore_rate:
                 bucket = SIZE_BUCKETS[math.floor(self.random() * len(SIZE_BUCKETS))]
             else:
-                bucket = sorted(SIZE_BUCKETS, key=lambda b: -sizes[bucket_key(b)]["avgNetUsd"])[0]
+                bucket = self._best_bucket(sizes)
         usd = math.floor(max_usd * bucket * 100) / 100
         # Tiny trades are all fees; fall back to the full size.
         return (usd, bucket) if usd >= 1 else (max_usd, 1)
@@ -348,6 +362,8 @@ class Brain:
 
         b = s["sizes"].setdefault(bucket_key(bucket), {"n": 0, "avgNetUsd": net_usd})
         b["avgNetUsd"] = net_usd if b["n"] == 0 else ewma(b["avgNetUsd"], net_usd, EDGE_SMOOTHING)
+        # Older brain files lack the bps average: start it from this scan.
+        b["avgNetBps"] = net_bps if b["n"] == 0 or "avgNetBps" not in b else ewma(b["avgNetBps"], net_bps, EDGE_SMOOTHING)
         b["n"] += 1
 
         hours = self.state["hourEdgeBps"]
@@ -561,8 +577,7 @@ class Brain:
         tokens = self.state["tokens"]
         for sym in self.rank_tokens(list(tokens)):
             s = tokens[sym]
-            sizes = sorted(_js_entries(s["sizes"]), key=lambda e: -e[1]["avgNetUsd"])
-            size = f", best size {js_round(float(sizes[0][0]) * 100)}%" if sizes else ""
+            size = f", best size {js_round(Brain._best_bucket(s['sizes']) * 100)}%" if s["sizes"] else ""
             lines.append(
                 f"{sym}: edge {to_fixed(s['avgEdgeBps'], 1)}bps, {s['fills']} fills, {s['failures']} fails, "
                 f"{s['phantoms']} fake gaps, ${to_fixed(s['pnlUsd'], 4)}{size}"

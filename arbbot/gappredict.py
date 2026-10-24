@@ -132,6 +132,18 @@ class GapPredictor:
         p, _ = self.predict(g)
         return clamp(p / self.score.base_rate(), MIN_FACTOR, MAX_FACTOR)
 
+    def token_bonus(self) -> dict[str, float]:
+        """
+        Score points per token for choosing what to scan: tokens whose gaps held
+        at re-checks more often than average get scanned more, those with mostly
+        fake gaps less (up to +-10, like bps of edge; 5+ re-checks per token).
+        """
+        overall = self.memory.global_
+        if overall.n < 10:
+            return {}
+        base = GapMemory.rate(overall)
+        return {sym: clamp((GapMemory.rate(t) - base) * 30, -10, 10) for sym, t in self.memory.by_token.items() if t.n >= 5}
+
     # -- reporting -------------------------------------------------------------------------
 
     def thoughts(self) -> list[str]:

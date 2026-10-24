@@ -165,3 +165,15 @@ def test_trend_stop_loss_and_restart(tmp_path):
     assert len(again.closes["WIF"]) >= HISTORY
     # A different horizon is a different question: it starts over.
     assert Trend(str(tmp_path), horizon_min=30).score.n == 0
+
+
+def test_token_bonus_rewards_tokens_with_real_gaps():
+    rnd = random.Random(5)
+    recs = [recheck(i, 4.0, 3.0 if rnd.random() < 0.8 else -5, symbol="JUP") for i in range(30)]
+    recs += [recheck(100 + i, 4.0, -8.0, symbol="WIF") for i in range(30)]
+    recs += [recheck(200 + i, 4.0, 3.0, symbol="NEW") for i in range(3)]
+    bonus = GapPredictor.from_records(recs).token_bonus()
+    assert bonus["JUP"] > 5 and bonus["WIF"] < -5
+    assert "NEW" not in bonus  # too few re-checks to judge
+    assert all(-10 <= v <= 10 for v in bonus.values())
+    assert GapPredictor.from_records(recs[:5]).token_bonus() == {}

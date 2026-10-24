@@ -608,7 +608,7 @@ class Engine:
                         liquid = {s: m for s, m in scannable.items() if s in cfg.tokens and can_act(safety_of(s, m).state, cfg.mode)}
                         triangles = triangle_turns.take(triangle_specs(liquid, cfg.triangle_pivot), TRIANGLES_PER_SCAN)
                     if not triangles:
-                        tokens = brain.pick_tokens(scannable)
+                        tokens = brain.pick_tokens(scannable, bonus=gap_predictor.token_bonus())
                     for s, ts in dirty:
                         if s not in tokens:
                             watcher.remark(s, ts)
@@ -929,7 +929,7 @@ class Engine:
                 if watcher:
                     actable = [s for s in scannable if can_act(safety_of(s, scannable[s]).state, cfg.mode)]
                     try:
-                        await watcher.watch([(s, last_pools.get(s, [])) for s in brain.rank_tokens(actable)])
+                        await watcher.watch([(s, last_pools.get(s, [])) for s in brain.rank_tokens(actable, gap_predictor.token_bonus())])
                     except Exception as err:  # noqa: BLE001
                         log.warn(f"pool watching failed: {str(err)[:120]}")
 
