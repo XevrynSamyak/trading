@@ -70,7 +70,28 @@ saved atomically with a `.bak` copy):
 | Pace | The fastest safe spacing per Jupiter request; slows down on "too many requests" and speeds up after clean scans. |
 | Thoughts | Plain-language explanations in `status` and `report`. |
 
-## 3. Event and latency data
+## 3. Probes and gap memory (`probes.ts`)
+
+Only gaps above the bar get re-checked as candidates, which is a few a day.
+So in paper mode the bot also **probes**: when a scan sees a positive gap
+below the bar, it stops there and re-quotes that cycle once, immediately (two
+quotes; nothing built or sent; at most `PROBES_PER_HOUR`, default 30). Probes
+go to `data/probes-<mode>.jsonl`, apart from the funnel, so they never count
+as trades, profit or go-live evidence.
+
+From probes plus every re-quoted opportunity, the gap memory learns how often
+a gap is still there (positive and at least half its quoted size) by gap
+size, token, venue (DEX), re-check delay and trigger (pool event vs routine
+scan). Rates use (held + 1) / (n + 2), and groups need 10+ examples before
+the brain says anything about them.
+
+It feeds decisions in one conservative way: a route through a venue whose
+gaps hold clearly less often than average (20+ examples) has its expected
+value scaled down, to as little as a quarter. It never raises trust above
+average. `npm run status` and `npm run report` show what it learned, and
+`npm run backtest` uses probes to show how lower bars would have fared.
+
+## 4. Event and latency data
 
 Every record carries timestamps for each stage. When a pool event triggered
 the quote, it also carries the market-change time. `npm run report` compares

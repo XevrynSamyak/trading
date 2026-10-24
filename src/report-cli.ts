@@ -11,6 +11,7 @@ import { LearningStats } from "./stats.js";
 import { readStatus } from "./status-file.js";
 import { formatVerdict, monthVerdict } from "./sustain.js";
 import { TokenSafety } from "./tokensafety.js";
+import { GapMemory, ProbeLog } from "./probes.js";
 
 /**
  * `npm run report`: quoted, executable, simulated and realized results kept
@@ -68,6 +69,9 @@ export function buildReportData(cfg: Config, now = Date.now()): ReportData & { b
       ...safety.verdict(symbol, mint, symbol in cfg.tokens, now),
     })),
     benchmark: readJsonWithBackup<BenchResult>(file("benchmark.json"))?.value ?? undefined,
+    gaps: ((m) => ({ table: m.table(), thoughts: m.thoughts() }))(
+      GapMemory.from(MODES.flatMap((m) => ProbeLog.read(file(`probes-${m}.jsonl`))), opps),
+    ),
     brainSummary: brain.summary(),
   };
 }

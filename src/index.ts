@@ -33,6 +33,7 @@ import { usdToUsdcAtoms } from "./profit.js";
 import { RiskManager } from "./risk.js";
 import { networkInterfaces } from "node:os";
 import { PoolWatcher, rpcSubscriber } from "./poolwatch.js";
+import { GapMemory, ProbeBudget, ProbeLog, held, probeFromOpp, venuesOf, type ProbeRecord } from "./probes.js";
 import { renderReport } from "./report.js";
 import { buildReportData } from "./report-cli.js";
 import { checkServerOptions, createStatusServer } from "./server.js";
@@ -166,9 +167,18 @@ async function main() {
   const countStage = (o: import("./funnel.js").OppRecord) => {
     for (const st of STAGES.slice(0, STAGES.indexOf(o.stage) + 1)) funnelToday[st] = (funnelToday[st] ?? 0) + 1;
   };
+  // What re-checks taught: probes (paper) plus every re-quoted opportunity.
+  const probePath = join(cfg.dataDir, `probes-${cfg.mode}.jsonl`);
+  const probeLog = new ProbeLog(probePath);
+  const probeBudget = new ProbeBudget(cfg.probesPerHour);
+  const gapMemory = GapMemory.from(ProbeLog.read(probePath));
   // (In a function so the replayed records can be freed once counted.)
   const learn = ((past) => {
-    for (const o of past) if (o.ts >= funnelDay) countStage(o);
+    for (const o of past) {
+      if (o.ts >= funnelDay) countStage(o);
+      const p = probeFromOpp(o);
+      if (p) gapMemory.observe(p);
+    }
     return LearningStats.fromRecords(past, { ...DEFAULT_PRIORS, landing: cfg.landingPrior });
   })(Funnel.read(funnelPath));
   const risk = new RiskManager(cfg);
@@ -517,9 +527,14 @@ async function main() {
       // Rank by expected value (net × learned chance of success), discounted for stale
       // quotes, slow execution, price impact and unproven tokens — not by the raw quote.
       const withWallet = !!simulateAs || isRealMoney(cfg.mode);
+      // Expected value, discounted for venues whose gaps have held less often than average.
+      const evFor = (c: Cycle, v: Valuation, p = learn.probabilities(c.symbol, c.routes, cfg.mode, withWallet)) => {
+        const ev = learn.expectedValue(v.netUsd, v.costs.networkUsd, p, cfg.mode, withWallet);
+        return ev > 0 ? ev * gapMemory.venueTrust(venuesOf(c.routes)) : ev;
+      };
       const rank = (x: Scored, at = Date.now()) => {
         const p = learn.probabilities(x.cycle.symbol, x.cycle.routes, cfg.mode, withWallet);
-        const ev = learn.expectedValue(x.val.netUsd, x.val.costs.networkUsd, p, cfg.mode, withWallet);
+        const ev = evFor(x.cycle, x.val, p);
         const score = scoreOpportunity({
           evUsd: ev,
           quoteAgeMs: at - x.cycle.quotedAt,
@@ -539,6 +554,8 @@ async function main() {
         ev >= cfg.minExpectedProfitUsd &&
         x.cycle.priceImpactBps <= cfg.maxPriceImpactBps;
 
+      const canProbe = cfg.mode === "paper" && cfg.probes;
+      let probeTarget: Scored | undefined;
       const scored = await scanCycles(jup, specs, sizeFor, solPrice, costs, {
         onError: (spec, err) => {
           if (!running) return; // stopping: skip the remaining quotes quietly
@@ -554,7 +571,16 @@ async function main() {
           if (!running) throw new Error("stopping");
         },
         // Gaps last moments: act on the first one worth it instead of quoting the rest first.
-        stopAfter: (x) => worthActing(x, rank(x).ev),
+        // In paper mode, also stop at a positive gap below the bar while probes are allowed,
+        // so its re-check happens right away, as a real trade's would.
+        stopAfter: (x) => {
+          if (worthActing(x, rank(x).ev)) return true;
+          if (canProbe && !probeTarget && x.val.netBps > cfg.probeMinBps && probeBudget.has()) {
+            probeTarget = x;
+            return true;
+          }
+          return false;
+        },
         marketTsFor: (spec) => marketTs.get(spec.symbol),
       });
       for (const { cycle } of scored) {
@@ -605,8 +631,7 @@ async function main() {
         const points = Math.min(cfg.maxLadderPoints, 1 + spareSizes);
         const sizes = ladderSizes(cfg.sizeLadderUsd, { maxUsd: sizeUsd, minUsd: 1 }, points, best.val.inUsd);
         if (sizes.length > 1) {
-          const evOf = (c: Cycle, v: Valuation) =>
-            learn.expectedValue(v.netUsd, v.costs.networkUsd, learn.probabilities(c.symbol, c.routes, cfg.mode, withWallet), cfg.mode, withWallet);
+          const evOf = (c: Cycle, v: Valuation) => evFor(c, v);
           const points = await evaluateLadder(
             sizes,
             async (usd) => {
@@ -667,6 +692,8 @@ async function main() {
         });
         funnel.record(opp);
         learn.observe(opp);
+        const asProbe = probeFromOpp(opp);
+        if (asProbe) gapMemory.observe(asProbe);
         lastOpp = opp;
         if (startOfUtcDay(opp.ts) !== funnelDay) {
           funnelDay = startOfUtcDay(opp.ts);
@@ -719,6 +746,40 @@ async function main() {
           (result.reason ? ` (${result.reason})` : "");
         if (result.status === "filled" || result.status === "failed") await notify(line);
         else log.event(line);
+      } else if (cfg.mode === "paper" && cfg.probes) {
+        // Probe: re-quote the best positive gap below the bar, to learn whether such gaps
+        // are real. Two quotes, nothing built or sent, never counted as a trade or profit.
+        const target =
+          probeTarget ?? scored.filter((x) => x.val.netBps > cfg.probeMinBps).sort((a, b) => b.val.netBps - a.val.netBps)[0];
+        const legsN = target?.cycle.legs.length ?? 0;
+        // The scan kept room for an immediate re-check; without it, skip rather than wait.
+        if (target && running && budget.available() >= legsN && probeBudget.allow()) {
+          try {
+            await waitForJupiter(legsN);
+            const fresh = await quoteCycle(jup, specOf(target.cycle), target.cycle.inAtoms, { marketTs: target.cycle.marketTs });
+            const fv = valueCycle(fresh, solPrice, costs);
+            const rec: ProbeRecord = {
+              ts: Date.now(),
+              symbol: target.cycle.symbol,
+              kind: target.cycle.kind,
+              venues: venuesOf(target.cycle.routes),
+              sizeUsd: target.val.inUsd,
+              quotedBps: target.val.netBps,
+              freshBps: fv.netBps,
+              ageMs: fresh.quotedAt - target.cycle.quotedAt,
+              event: target.cycle.marketTs !== undefined,
+            };
+            probeLog.append(rec);
+            gapMemory.observe(rec);
+            log.info(
+              `probe ${rec.symbol}: quoted ${rec.quotedBps.toFixed(1)}bps -> ${rec.freshBps.toFixed(1)}bps ` +
+                `${rec.ageMs} ms later (${held(rec) ? "still there" : "gone"}; learning only, nothing traded)`,
+            );
+          } catch (err) {
+            if (String(err).includes(" 429")) rateLimited = true;
+            log.warn(`probe failed: ${String(err).slice(0, 120)}`);
+          }
+        }
       }
 
       // Follow the pools of the most promising tokens the bot may act on.

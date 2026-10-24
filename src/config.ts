@@ -173,6 +173,10 @@ export interface Config {
   trianglePivot: string;
   /** Every Nth full scan quotes triangles instead of two-leg round trips. */
   triangleEvery: number;
+  /** Paper mode: re-check positive gaps below the bar (learning only, nothing traded). */
+  probes: boolean;
+  probeMinBps: number;
+  probesPerHour: number;
   /** Optional status server (status page, JSON, report, emergency stop). Off when unset. */
   statusHttpPort?: number;
   statusHttpHost: string;
@@ -293,6 +297,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     triangles: env.TRIANGLES !== "off",
     trianglePivot: env.TRIANGLE_PIVOT || "SOL",
     triangleEvery: Math.max(2, Math.floor(num(env, "TRIANGLE_EVERY", 4))),
+    probes: env.PROBES !== "off",
+    probeMinBps: num(env, "PROBE_MIN_BPS", 0),
+    probesPerHour: Math.max(0, Math.floor(num(env, "PROBES_PER_HOUR", 30))),
     statusHttpPort: env.STATUS_HTTP_PORT ? num(env, "STATUS_HTTP_PORT", 0) : undefined,
     statusHttpHost: env.STATUS_HTTP_HOST || "127.0.0.1",
     statusHttpToken: env.STATUS_HTTP_TOKEN || undefined,

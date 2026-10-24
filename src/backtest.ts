@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { loadConfig, type Mode } from "./config.js";
 import { Funnel, STAGES, type OppRecord } from "./funnel.js";
+import { ProbeLog, gapBucket, held, type ProbeRecord } from "./probes.js";
 
 /**
  * `npm run backtest`: replays the recorded opportunities (data/opps-*.jsonl)
@@ -120,9 +121,23 @@ export function sizePolicies(opps: OppRecord[]): { name: string; n: number; quot
 const usd = (n: number) => `${n >= 0 ? "+" : "-"}$${Math.abs(n).toFixed(4)}`;
 const pct = (a: number, b: number) => (b ? `${((a / b) * 100).toFixed(0)}%` : "n/a");
 
-export function renderBacktest(opps: OppRecord[]): string {
+export function renderBacktest(opps: OppRecord[], probes: ProbeRecord[] = []): string {
   const out: string[] = [];
   out.push(`Backtest over ${opps.length} recorded opportunities (what the bot actually acted on).`);
+  if (probes.length) {
+    out.push("");
+    out.push(`Gaps below the bar, re-checked by probes (${probes.length}; learning only, nothing traded):`);
+    const buckets = new Map<string, { n: number; held: number }>();
+    for (const p of probes) {
+      const b = buckets.get(gapBucket(p.quotedBps)) ?? { n: 0, held: 0 };
+      b.n += 1;
+      if (held(p)) b.held += 1;
+      buckets.set(gapBucket(p.quotedBps), b);
+    }
+    for (const [b, t] of buckets) out.push(`  quoted ${b.padEnd(8)} bps: ${pct(t.held, t.n).padStart(4)} still there  (n=${t.n})`);
+    out.push("  A lower bar only helps where small gaps are still there at the re-check.");
+    out.push("");
+  }
   if (!opps.length) {
     out.push("Nothing recorded yet: let the bot run in paper mode first.");
     return out.join("\n");
@@ -155,7 +170,11 @@ export function renderBacktest(opps: OppRecord[]): string {
     for (const s of sizes) out.push(`  ${s.name.padEnd(28)} ${usd(s.quotedUsd)}  (n=${s.n})`);
   }
   out.push("");
-  out.push("Looser rules can't be judged from this data: candidates below the bar were never re-checked.");
+  out.push(
+    probes.length
+      ? "Looser rules: see the probe section above (re-quotes only; on-chain results need trades above the bar)."
+      : "Looser rules can't be judged from this data: candidates below the bar were never re-checked.",
+  );
   return out.join("\n");
 }
 
@@ -164,5 +183,6 @@ if (process.argv[1]?.endsWith("backtest.ts")) {
   const arg = process.argv.find((a) => a.startsWith("--mode="))?.slice(7) as Mode | undefined;
   const modes: Mode[] = arg ? [arg] : ["paper", "micro", "live"];
   const opps = modes.flatMap((m) => Funnel.read(join(cfg.dataDir, `opps-${m}.jsonl`)));
-  console.log(renderBacktest(opps));
+  const probes = modes.flatMap((m) => ProbeLog.read(join(cfg.dataDir, `probes-${m}.jsonl`)));
+  console.log(renderBacktest(opps, probes));
 }

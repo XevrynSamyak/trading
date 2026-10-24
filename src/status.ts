@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { Brain, EDGE_BINS } from "./brain.js";
 import { loadConfig, type Config } from "./config.js";
 import { FunnelReader } from "./funnel.js";
+import { GapMemory, ProbeLog } from "./probes.js";
 import { gateThresholds, goLiveVerdict, loadGateInput, type Verdict } from "./gate.js";
 import { halted, tradingDisabled } from "./killswitch.js";
 import { Ledger, startOfUtcDay, totalsByBasis, type Basis, type BasisTotals, type TradeRecord } from "./ledger.js";
@@ -247,6 +248,16 @@ const readCached = (path: string) => {
   return r.read();
 };
 
+/** The brain's own thoughts and what re-checks taught, alternating so both show. */
+export function mixThoughts(brain: string[], gaps: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < Math.max(brain.length, gaps.length); i++) {
+    if (brain[i]) out.push(brain[i]);
+    if (gaps[i]) out.push(gaps[i]);
+  }
+  return out;
+}
+
 /** Reads the data folder. The engine's status server calls this too. */
 export function gatherStatus(cfg: Config, now = Date.now()): StatusData {
   const live = readStatus(join(cfg.dataDir, "status.json"));
@@ -268,7 +279,13 @@ export function gatherStatus(cfg: Config, now = Date.now()): StatusData {
     paperDaysTarget: cfg.gateMinPaperDays,
     verdict,
     edgeHistogram: brain.state.edgeHistogram,
-    thoughts: brain.thoughts(cfg.minProfitBps),
+    thoughts: mixThoughts(
+      brain.thoughts(cfg.minProfitBps),
+      GapMemory.from(
+        ProbeLog.read(join(cfg.dataDir, `probes-${cfg.mode}.jsonl`)),
+        readCached(join(cfg.dataDir, `opps-${cfg.mode}.jsonl`)),
+      ).thoughts(),
+    ),
     events: tailLines(join(cfg.dataDir, "bot.log"), 400)
       .filter((l) => EVENT_PATTERN.test(l))
       .slice(-6),

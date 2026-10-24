@@ -51,7 +51,10 @@ paper mode, and it stops on its own before losing more than you allow.
    there (quote-only paper), simulates it on-chain (paper with a wallet
    address), or simulates, signs and sends it via Jito (MICRO/LIVE).
    EXECUTION.md has the details.
-7. **Records** one funnel line per opportunity (quoted → executable →
+7. **Learns from probes** (paper mode): a positive gap below the bar is
+   re-quoted once right away, so the brain learns which gap sizes, tokens and
+   exchanges give real gaps, and trusts the rest less. Nothing is sent.
+8. **Records** one funnel line per opportunity (quoted → executable →
    simulated → submitted → landed → profitable, with timestamps) and one
    ledger line with its basis. Both learners update from checked results
    only.

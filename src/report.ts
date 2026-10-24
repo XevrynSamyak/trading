@@ -25,6 +25,8 @@ export interface ReportData {
   safety?: { symbol: string; state: SafetyState; reasons: string[] }[];
   /** Last `npm run benchmark` from this device. */
   benchmark?: BenchResult;
+  /** What re-checks (probes and re-quoted opportunities) taught. */
+  gaps?: { table: { bucket: string; n: number; heldPct: number; avgDecayBps: number }[]; thoughts: string[] };
 }
 
 const median = (xs: number[]) => {
@@ -159,6 +161,18 @@ export function renderReport(d: ReportData): string {
       );
     }
     out.push("  (* = simulated on-chain, no real trades yet)");
+    out.push("");
+  }
+
+  if (d.gaps?.table.length) {
+    out.push("What re-checks taught       (gap still there when quoted again; learning only)");
+    out.push("  quoted gap     n   still there   shrank on average");
+    for (const r of d.gaps.table) {
+      out.push(
+        `  ${r.bucket.padEnd(10)} ${String(r.n).padStart(5)}   ${`${r.heldPct.toFixed(0)}%`.padStart(11)}   ${r.avgDecayBps.toFixed(1).padStart(8)}bps`,
+      );
+    }
+    for (const t of d.gaps.thoughts) out.push(`  - ${t}`);
     out.push("");
   }
 
