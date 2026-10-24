@@ -12,11 +12,13 @@ from .brain import Brain
 from .funnel import STAGES, Funnel
 from .gate import GateThresholds, Verdict, go_live_verdict, load_gate_input
 from .ledger import Ledger, basis_of, money_basis, totals_by_basis
-from .probes import GapMemory, ProbeLog
+from .gappredict import GapPredictor
+from .probes import ProbeLog
 from .stats import LearningStats, size_bucket
 from .status_file import read_status
 from .sustain import format_verdict, month_verdict
 from .tokensafety import STATES, SafetyThresholds, TokenSafety
+from .trend import Trend
 from .util import iso, js_round, now_ms, start_of_utc_day, start_of_utc_month, to_fixed
 
 MODES = ["paper", "micro", "live"]
@@ -42,6 +44,10 @@ class ReportData:
     #: What re-checks taught: {"table": [...], "thoughts": [...]}.
     gaps: dict | None = None
     brain_summary: str = ""
+    #: Gap predictor scorecard (GapPredictor.summary()).
+    gap_predict: dict | None = None
+    #: Price-direction predictions, paper only: {"status": Trend.status(), "thoughts": [...], "evidence": str}.
+    trend: dict | None = None
 
 
 def _median(xs: list[float]) -> float | None:
@@ -227,6 +233,43 @@ def render_report(d: ReportData) -> str:
             out.append(f"  - {t}")
         out.append("")
 
+    gp = d.gap_predict
+    if gp and gp.get("n"):
+        out.append("Gap predictions               (each scored before its outcome was known)")
+        out.append(f"  re-checks scored:           {gp['n']}")
+        skill = gp["skill_pct"]
+        out.append(
+            f"  vs assuming the average:    {'+' if skill >= 0 else ''}{to_fixed(skill, 1)}% "
+            f"({'used to decide' if gp['used'] else 'not used to decide yet'})"
+        )
+        out.append(f"  right at a 50% cut-off:     {to_fixed(gp['accuracy_pct'], 0)}% (always guessing the usual outcome: "
+                   f"{to_fixed(gp['accuracy_base_pct'], 0)}%)")
+        if gp.get("size_err_bps") is not None:
+            out.append(f"  gap size at re-check:       off by {to_fixed(gp['size_err_bps'], 1)}bps on average "
+                       f"(the quote at face value: {to_fixed(gp['size_err_quote_bps'], 1)}bps)")
+        for row in gp.get("calibration", []):
+            out.append(f"    said {row['range'].ljust(8)} n={str(row['n']).ljust(5)} actually still there "
+                       f"{to_fixed(row['actual_pct'], 0)}%")
+        out.append("")
+
+    tr = d.trend
+    if tr and tr.get("status"):
+        st = tr["status"]
+        out.append("Price-direction predictions   (PAPER ONLY: never traded with real money)")
+        out.append(f"  question:                   will a token rise more than its trading costs in {st['horizonMin']} min?")
+        out.append(f"  tokens with enough history: {st['tokens']} of {st['watching']}")
+        if st["predictions"]:
+            out.append(f"  predictions checked:        {st['predictions']:,}, right {to_fixed(st['accuracyPct'], 0)}% "
+                       f"(always 'no': {to_fixed(st['baseAccuracyPct'], 0)}%), vs average {'+' if st['skillPct'] >= 0 else ''}"
+                       f"{to_fixed(st['skillPct'], 1)}%")
+            sign = "+" if st["netUsd"] >= 0 else "-"
+            out.append(f"  paper trades:               {st['trades']} closed, {st['open']} open, "
+                       f"{sign}${to_fixed(abs(st['netUsd']), 4)} after costs (paper)")
+            out.append(f"  verdict:                    {tr['evidence']}")
+        for t in tr.get("thoughts", []):
+            out.append(f"  - {t}")
+        out.append("")
+
     if d.safety:
         out.append("Token safety                  (BLOCKED: never quoted, WATCH: quoted only, PAPER_ONLY, LIVE_ALLOWED)")
         for t in sorted(d.safety, key=lambda t: (STATES.index(t["state"]), t["symbol"].casefold(), t["symbol"].swapcase())):
@@ -329,7 +372,9 @@ def build_report_data(cfg, now: int | None = None) -> ReportData:
         v = safety.verdict(symbol, mint, symbol in cfg.tokens, now)
         safety_rows.append({"symbol": symbol, "state": v.state, "reasons": v.reasons})
     bench = read_json_with_backup(file("benchmark.json"))
-    gaps = GapMemory.from_records([p for m in MODES for p in ProbeLog.read(file(f"probes-{m}.jsonl"))], opps)
+    gaps = GapPredictor.from_records([p for m in MODES for p in ProbeLog.read(file(f"probes-{m}.jsonl"))], opps)
+    trend = Trend(cfg.data_dir, cfg.trend_horizon_min, cfg.trend_enter_prob, cfg.trend_max_positions, cfg.trend_stop_pct,
+                  readonly=True) if cfg.trend_paper else None
     return ReportData(
         mode_now=cfg.mode,
         scans=scans,
@@ -342,8 +387,10 @@ def build_report_data(cfg, now: int | None = None) -> ReportData:
         bills_line=bills_line,
         safety=safety_rows,
         benchmark=bench[0] if bench and isinstance(bench[0], dict) else None,
-        gaps={"table": gaps.table(), "thoughts": gaps.thoughts()},
+        gaps={"table": gaps.memory.table(), "thoughts": gaps.memory.thoughts()},
         brain_summary=brain.summary(),
+        gap_predict=gaps.summary(),
+        trend={"status": trend.status(), "thoughts": trend.thoughts(), "evidence": trend.evidence()} if trend else None,
     )
 
 

@@ -146,6 +146,20 @@ watches up to 8 pools (`MAX_WATCHED_POOLS`). A pool change during a routine
 scan skips the rest of that scan, so the changed token is quoted next. Wallet balances (Helius) are read at
 most once a minute to stay well inside the free RPC plan.
 
+## Predictions
+
+The bot makes two kinds of predictions, and scores every one of them against
+what then happened (details in LEARNING.md):
+
+- **Which gaps are real:** for every quoted gap, the chance it is still there
+  at the fresh re-check and its size then. Used in decisions only after it
+  has clearly beaten "assume the average" over 100+ re-checks.
+- **Price direction, paper only:** every minute, the chance each token rises
+  more than its measured trading costs within 15 minutes, from chart-style
+  measurements. Confident predictions become **paper** trades (costs
+  included). This is never traded with real money; `npm run report` shows
+  whether it beats chance.
+
 ## Triangles and backtesting
 
 Every few full scans (`TRIANGLE_EVERY`, default 4) the bot quotes triangles

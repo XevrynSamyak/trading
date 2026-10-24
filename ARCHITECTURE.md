@@ -57,6 +57,9 @@ All modules live in `arbbot/`.
 | `tokensafety.py`, `discovery.py` | Token states from mint accounts and Jupiter's token list. |
 | `poolwatch.py` | WebSocket pool subscriptions with caps (event triggers). |
 | `pricewatch.py` | Jupiter price API: every known token's price in one request, to spot movers. |
+| `predict.py` | Prediction maths: online logistic and linear models, and the scorecard that tests every prediction before learning its outcome. |
+| `gappredict.py` | Predicts whether a quoted gap will still be there at the re-check, and its size. |
+| `trend.py` | Price-direction predictions from 1-minute prices, with paper trades only. |
 | `status.py`, `status_file.py`, `server.py` | Status screen data/rendering, `status.json`, optional HTTP status page. |
 | `report.py`, `backtest.py`, `benchmark.py`, `check.py`, `control.py`, `notify.py` | The other commands and Telegram alerts. |
 | `atomic.py`, `jsonl.py`, `tail.py`, `util.py` | Crash-safe JSON writes, JSON-lines files, reading the end of a file, time helpers. |
@@ -74,6 +77,8 @@ so a phone's existing `data/` folder carries over unchanged.
 | `token-safety.json` (+ `.bak`) | engine, `check` | Mint facts and market facts per token. |
 | `status.json` | engine | Live snapshot for the status screens. |
 | `benchmark.json` | `benchmark` | Last latency measurement. |
+| `minutes.jsonl` | engine | 1-minute prices of every watched token (for price-direction predictions). |
+| `trend.json` (+ `.bak`), `trend-paper.jsonl` | engine | Price-direction model, scorecard, open paper positions; closed paper trades. Paper only. |
 | `TRADING_DISABLED` | `stop-trading`, engine, status page | Kill switch; only `enable-trading` removes it. |
 | `HALTED` | engine | Loss floor or retirement; delete by hand after reading. |
 | `bot.log`, `run.pid` | `deploy/termux-run.sh` | Log (redacted) and the single-instance lock. |

@@ -19,7 +19,8 @@ from .funnel import FunnelReader
 from .gate import GateThresholds, go_live_verdict, load_gate_input
 from .killswitch import halted, trading_disabled
 from .ledger import Ledger, totals_by_basis
-from .probes import GapMemory, ProbeLog
+from .gappredict import GapPredictor
+from .probes import ProbeLog
 from .status_file import is_alive, read_status
 from .tail import tail_lines
 from .util import iso, js_round, js_str, now_ms, start_of_utc_day, to_fixed
@@ -144,6 +145,31 @@ def render_status(i: dict, now: int, color: bool) -> str:
                 f"Events:  {watching}, {_thousands(e.get('eventsToday', 0))} / {_thousands(e.get('cap', 0))} updates today"
                 + (dim(f"  ({e['tooBusy']} too-busy pool(s) resting)") if e.get("tooBusy") else "")
             )
+        gp = live.get("gapPredict")
+        if gp and gp.get("n"):
+            skill = gp.get("skillPct", 0)
+            how = f"{to_fixed(skill, 0)}% better than the average" if skill > 0 else "no better than the average yet"
+            out.append(
+                f"Predict: gaps: {gp['n']} re-checks scored, {how} "
+                + dim("(used to decide)" if gp.get("used") else "(not used until it clearly beats the average)")
+            )
+        tr = live.get("trend")
+        if tr:
+            if tr.get("predictions"):
+                money = f"{'+' if tr.get('netUsd', 0) >= 0 else '-'}${to_fixed(abs(tr.get('netUsd', 0)), 4)}"
+                out.append(
+                    f"Trend:   {tr['predictions']} price predictions checked, right {to_fixed(tr.get('accuracyPct', 0), 0)}% "
+                    f"(always 'no': {to_fixed(tr.get('baseAccuracyPct', 0), 0)}%); paper: {tr.get('open', 0)} open, "
+                    f"{tr.get('trades', 0)} closed, {money} " + dim("(paper only)")
+                )
+                top = ", ".join(f"{sym} {to_fixed(p * 100, 0)}%" for sym, p in tr.get("top") or [])
+                if top:
+                    out.append(dim(f"         chance of rising more than costs in {tr.get('horizonMin', 15)} min: {top}"))
+            else:
+                out.append(
+                    f"Trend:   collecting 1-minute prices; {tr.get('tokens', 0)} of {tr.get('watching', 0)} tokens have the hour "
+                    "of history predictions need " + dim("(paper only)")
+                )
         pw = live.get("priceWatch")
         if pw and pw.get("tokens"):
             out.append(f"Prices:  watching {pw['tokens']} tokens every {duration(pw['everyMs'])} " + dim("(1 request; movers get quoted first)"))
@@ -261,7 +287,7 @@ def gather_status(cfg, now: int | None = None) -> dict:
         verdict = verdict_dict(go_live_verdict(load_gate_input(d, now, _read_cached), GateThresholds.from_config(cfg)))
     except Exception:  # noqa: BLE001 - the verdict is a hint on this screen; `report` shows any problem
         verdict = None
-    gaps = GapMemory.from_records(
+    gaps = GapPredictor.from_records(
         ProbeLog.read(os.path.join(d, f"probes-{cfg.mode}.jsonl")), _read_cached(os.path.join(d, f"opps-{cfg.mode}.jsonl"))
     )
     return {
@@ -274,7 +300,7 @@ def gather_status(cfg, now: int | None = None) -> dict:
         "paperDaysTarget": cfg.gate_min_paper_days,
         "verdict": verdict,
         "edgeHistogram": brain.state["edgeHistogram"],
-        "thoughts": mix_thoughts(brain.thoughts(cfg.min_profit_bps), gaps.thoughts()),
+        "thoughts": mix_thoughts(brain.thoughts(cfg.min_profit_bps), gaps.thoughts() + gaps.memory.thoughts()),
         "events": [l for l in tail_lines(os.path.join(d, "bot.log"), 400) if EVENT_PATTERN.search(l)][-6:],
     }
 

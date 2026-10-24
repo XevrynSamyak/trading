@@ -92,6 +92,14 @@ def test_pause_reason_and_extras():
     assert "Events:  watching 3 pool(s), 12,345 / 60,000 updates today  (1 too-busy pool(s) resting)" in text
     assert "Focus:   WIF" in text
     assert "Prices:  watching 28 tokens every 15s" in render(live=live(priceWatch={"tokens": 28, "everyMs": 15_000}))
+    pred = render(live=live(gapPredict={"n": 140, "skillPct": 12.4, "used": True},
+                            trend={"predictions": 950, "accuracyPct": 81.2, "baseAccuracyPct": 80.0, "open": 1, "trades": 7,
+                                   "netUsd": -0.0123, "horizonMin": 15, "top": [["WIF", 0.62], ["JUP", 0.31]], "tokens": 20, "watching": 25}))
+    assert "Predict: gaps: 140 re-checks scored, 12% better than the average (used to decide)" in pred
+    assert "Trend:   950 price predictions checked, right 81% (always 'no': 80%); paper: 1 open, 7 closed, -$0.0123 (paper only)" in pred
+    assert "chance of rising more than costs in 15 min: WIF 62%, JUP 31%" in pred
+    early = render(live=live(trend={"predictions": 0, "tokens": 3, "watching": 25}))
+    assert "Trend:   collecting 1-minute prices; 3 of 25 tokens have the hour of history predictions need (paper only)" in early
     assert "Funnel:  quoted 4 → executable 1 → simulated 0" in text
     assert 'Latest:  opp_1 WIF quoted 22.0bps → fresh -3.1bps → stale at "quoted" (812 ms)' in text
 

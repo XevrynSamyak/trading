@@ -193,6 +193,11 @@ class Config:
     price_watch: bool
     price_watch_ms: int
     jupiter_price_api: str
+    trend_paper: bool
+    trend_horizon_min: int
+    trend_enter_prob: float
+    trend_max_positions: int
+    trend_stop_pct: float
     status_http_port: int | None
     status_http_host: str
     status_http_token: str | None
@@ -301,6 +306,12 @@ def load_config(env: dict | None = None) -> Config:
         price_watch=env.get("PRICE_WATCH") != "off",
         price_watch_ms=max(5_000, int(n("PRICE_WATCH_MS", 15_000))),
         jupiter_price_api=_jupiter_url(env.get("JUPITER_PRICE_API"), "/price/v3", key),
+        # Price-direction predictions with paper trades only (never real money), from the price watch.
+        trend_paper=env.get("TREND_PAPER") != "off",
+        trend_horizon_min=max(1, int(n("TREND_HORIZON_MIN", 15))),
+        trend_enter_prob=n("TREND_ENTER_PROB", 0.6),
+        trend_max_positions=max(0, int(n("TREND_MAX_POSITIONS", 3))),
+        trend_stop_pct=n("TREND_STOP_PCT", 1.5),
         status_http_port=int(n("STATUS_HTTP_PORT", 0)) if env.get("STATUS_HTTP_PORT") else None,
         status_http_host=env.get("STATUS_HTTP_HOST") or "127.0.0.1",
         status_http_token=env.get("STATUS_HTTP_TOKEN") or None,
@@ -311,6 +322,8 @@ def load_config(env: dict | None = None) -> Config:
 
     if not (0 < cfg.trade_size_pct <= 1):
         raise ValueError("TRADE_SIZE_PCT must be in (0, 1]")
+    if not (0.5 <= cfg.trend_enter_prob < 1):
+        raise ValueError("TREND_ENTER_PROB must be in [0.5, 1)")
     if not (0 <= cfg.jito_tip_share < 1):
         raise ValueError("JITO_TIP_SHARE must be in [0, 1)")
     if cfg.jito_max_tip_lamports < cfg.jito_tip_lamports:

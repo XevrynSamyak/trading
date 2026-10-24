@@ -29,6 +29,12 @@ phone runner does not restart it).
 
 Quote-only results never count. The kill switch or a halt blocks both.
 
+
+**Price-direction predictions are paper only, in every mode.** The bot
+predicts short-term price moves and records paper trades on them
+(`data/trend-paper.jsonl`), but there is no code path that trades them with
+real money, and their results never count toward P&L or the go-live gate.
+
 ## Loss guards
 
 | Guard | Default | Effect |

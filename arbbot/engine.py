@@ -31,7 +31,8 @@ from .log import log
 from .notify import make_notifier
 from .poolwatch import PoolWatcher, RpcSubscriber, WatchOptions
 from .pricewatch import fetch_prices, requests_needed
-from .probes import GapMemory, ProbeBudget, ProbeLog, held, probe_from_opp, venues_of
+from .gappredict import GapPredictor
+from .probes import ProbeBudget, ProbeLog, held, probe_from_opp, venues_of
 from .profit import usd_to_usdc_atoms
 from .report import build_report_data, render_report
 from .risk import RiskManager
@@ -46,6 +47,7 @@ from .status import gather_status
 from .status_file import write_status
 from .sustain import format_verdict, month_verdict, should_retire
 from .tokensafety import SafetyThresholds, TokenSafety, can_act, can_scan
+from .trend import Trend
 from .triangles import Rotation, triangle_specs
 from .util import iso, js_round, js_str, now_ms, start_of_utc_day, start_of_utc_month, to_fixed
 from .wallet import BalanceCache, load_keypair, wallet_value_usd
@@ -250,16 +252,20 @@ class Engine:
         probe_path = os.path.join(cfg.data_dir, f"probes-{cfg.mode}.jsonl")
         probe_log = ProbeLog(probe_path)
         probe_budget = ProbeBudget(cfg.probes_per_hour)
-        gap_memory = GapMemory.from_records(ProbeLog.read(probe_path))
         past = Funnel.read(funnel_path)
         for o in past:
             if o["ts"] >= funnel_day:
                 count_stage(o)
-            p = probe_from_opp(o)
-            if p:
-                gap_memory.observe(p)
+        # Predicts which gaps are real; replays every re-check, scoring each prediction first.
+        gap_predictor = GapPredictor.from_records(ProbeLog.read(probe_path), past)
         learn = LearningStats.from_records(past, Priors(landing=cfg.landing_prior))
         del past
+        # Price-direction predictions with paper trades only (never real money).
+        trend = (
+            Trend(cfg.data_dir, cfg.trend_horizon_min, cfg.trend_enter_prob, cfg.trend_max_positions, cfg.trend_stop_pct)
+            if cfg.trend_paper and cfg.price_watch
+            else None
+        )
         risk = RiskManager(cfg)
         # Token safety: what each token's mint allows (fees, hooks, freezes...) and how healthy its market is.
         safety = TokenSafety(os.path.join(cfg.data_dir, "token-safety.json"), cfg.live_tokens, SafetyThresholds.from_config(cfg))
@@ -553,6 +559,18 @@ class Engine:
                                                     cfg.jupiter_api_key, budget.record)
                         watched_prices = len(prices)
                         price_failures = 0
+                        if trend:
+                            def cost_of(sym: str) -> float:
+                                # What a buy-then-sell of this token costs, as this bot's own scans measured it.
+                                t = brain.state["tokens"].get(sym)
+                                if t and t.get("scans", 0) >= 5:
+                                    return max(5.0, -float(t.get("avgEdgeBps", 0)))
+                                return 40.0
+
+                            tradable = {s for s, m in scannable.items() if can_act(safety_of(s, m).state, "paper")}
+                            for line in trend.on_prices({s: prices[m] for s, m in scannable.items() if m in prices},
+                                                        now_ms(), cost_of, size_usd, tradable):
+                                log.event(line)
                         t = now_ms()
                         moved = []
                         for sym, mint in scannable.items():
@@ -610,11 +628,20 @@ class Engine:
                 # quotes, slow execution, price impact and unproven tokens — not by the raw quote.
                 with_wallet = bool(simulate_as) or is_real_money(cfg.mode)
 
+                def gap_of(c, v) -> dict:
+                    """A scanned gap, described the way the gap predictor learned them."""
+                    return {"ts": now_ms(), "symbol": c.symbol, "kind": c.kind, "venues": venues_of(c.routes),
+                            "sizeUsd": v.in_usd, "quotedBps": v.net_bps, "event": c.market_ts is not None}
+
+                def predicted(c, v) -> dict:
+                    p, fresh = gap_predictor.predict(gap_of(c, v))
+                    return {"pHold": round(p, 4), "freshBps": round(fresh, 2)}
+
                 def ev_for(c, v, p=None) -> float:
-                    """Expected value, discounted for venues whose gaps have held less often than average."""
+                    """Expected value, scaled by the gap predictor (venue trust until it has proven itself)."""
                     p = p or learn.probabilities(c.symbol, c.routes, cfg.mode, with_wallet)
                     ev = learn.expected_value(v.net_usd, v.costs.network_usd, p, cfg.mode, with_wallet)
-                    return ev * gap_memory.venue_trust(venues_of(c.routes)) if ev > 0 else ev
+                    return ev * gap_predictor.factor(gap_of(c, v)) if ev > 0 else ev
 
                 def rank(x, at: float | None = None):
                     at = now_ms() if at is None else at
@@ -772,6 +799,7 @@ class Engine:
                             ladder_says_no = True
                     # Detection -> decision includes the ladder's extra quotes: that time counts too.
                     decided_at = now_ms()
+                    prediction = predicted(cycle, val)
                     deps = ExecDeps(
                         rpc=rpc, jup=jup, cfg=cfg, cost_settings=costs, sol_price_usd=sol_price,
                         floor_bps=min(brain.min_profit_bps, cfg.min_profit_bps), tip_account=pick_tip(), jito=jito,
@@ -797,13 +825,13 @@ class Engine:
                         id=funnel.next_id(decided_at), mode=cfg.mode, cycle=cycle, val=val, result=result,
                         decision_ts=decided_at, detected=bx.cycle,
                         expected={"pSuccess": chosen_p.success, "evUsd": chosen_ev, "assumed": chosen_p.assumed},
-                        sol_price_usd=sol_price, ladder=ladder,
+                        sol_price_usd=sol_price, ladder=ladder, predicted=prediction,
                     )
                     funnel.record(opp)
                     learn.observe(opp)
                     as_probe = probe_from_opp(opp)
                     if as_probe:
-                        gap_memory.observe(as_probe)
+                        gap_predictor.learn(as_probe)
                     last_opp = opp
                     if start_of_utc_day(opp["ts"]) != funnel_day:
                         funnel_day = start_of_utc_day(opp["ts"])
@@ -870,6 +898,7 @@ class Engine:
                     # The scan kept room for an immediate re-check; without it, skip rather than wait.
                     if target and self.running and budget.available() >= legs_n and probe_budget.allow():
                         try:
+                            prediction = predicted(target.cycle, target.val)
                             await wait_for_jupiter(legs_n)
                             fresh = await quote_cycle(jup, spec_of(target.cycle), target.cycle.in_atoms, market_ts=target.cycle.market_ts)
                             fv = value_cycle(fresh, sol_price, costs)
@@ -883,9 +912,10 @@ class Engine:
                                 "freshBps": fv.net_bps,
                                 "ageMs": fresh.quoted_at - target.cycle.quoted_at,
                                 "event": target.cycle.market_ts is not None,
+                                "predicted": prediction,
                             }
                             probe_log.append(rec)
-                            gap_memory.observe(rec)
+                            gap_predictor.learn(rec)
                             log.info(
                                 f"probe {rec['symbol']}: quoted {to_fixed(rec['quotedBps'], 1)}bps -> {to_fixed(rec['freshBps'], 1)}bps "
                                 f"{rec['ageMs']} ms later ({'still there' if held(rec) else 'gone'}; learning only, nothing traded)"
@@ -940,6 +970,8 @@ class Engine:
                     } if ws_stats else None,
                     quoteMs=js_round(quote_ms_avg) if quote_ms_avg is not None else None,
                     priceWatch={"tokens": watched_prices, "everyMs": cfg.price_watch_ms} if cfg.price_watch else None,
+                    gapPredict={"n": gap_predictor.score.n, "skillPct": gap_predictor.score.skill() * 100, "used": gap_predictor.skilled()},
+                    trend=trend.status() if trend else None,
                     lastBest={
                         "symbol": best[0].cycle.symbol,
                         "netBps": best[0].val.net_bps,

@@ -91,7 +91,49 @@ value scaled down, to as little as a quarter. It never raises trust above
 average. `npm run status` and `npm run report` show what it learned, and
 `npm run backtest` uses probes to show how lower bars would have fared.
 
-## 4. Event and latency data
+## 4. Gap predictions (`gappredict.py`)
+
+Re-checks also train a small prediction model (logistic regression, learned
+one example at a time, in plain Python). For every quoted gap it predicts
+the chance the gap is still there at the fresh re-check, and how big it will
+be then, from: the quoted gap size, the re-check delay, whether a pool change
+triggered it, round trip or triangle, how often that token's and venue's gaps
+held before, the hour and the trade size.
+
+Each prediction is **scored before the model learns its outcome**, against
+the simplest honest guess: "the average so far". The report shows the
+result, a calibration table ("when I said 20–30%, 25% were still there") and
+how far off its size guesses were compared with taking quotes at face value.
+The predictions only change decisions after 100+ re-checks **and** a clear
+edge over the average (5%+ better). Then a gap's expected value is scaled by
+its predicted chance relative to the average (between 0.25x and 1.5x);
+before that, the venue trust in section 3 applies.
+
+## 5. Price-direction predictions (`trend.py`): paper only
+
+From the price watch, the bot keeps 1-minute prices for every token. Every
+minute, for each token with an hour of history, it predicts: **will this
+token rise by more than its trading costs within the next 15 minutes?** The
+costs are the token's round-trip cost as this bot measured it in its scans
+(fees, price impact, network fees). Inputs are chart-style: moves over 1, 5,
+15 and 60 minutes and a fast-vs-slow average crossover, all scaled by the
+token's own volatility, plus volatility and where the price sits in its
+last-hour range.
+
+Every prediction is scored when its 15 minutes are up and compared with
+always saying "no". After 200 scored predictions, confident ones (60%+,
+`TREND_ENTER_PROB`) open **paper** positions: bought at the watched price,
+sold after 15 minutes or at a 1.5% stop loss, with the measured costs
+subtracted. Spot trading can only gain from rises, so it never sells short.
+
+This strategy has **no real-money path**. Its results live in their own
+files (`data/trend.json`, `data/trend-paper.jsonl`, `data/minutes.jsonl`) and
+never count toward P&L, the go-live gate or the arbitrage funnel. The report
+says plainly whether the paper trades beat their costs by more than luck
+(30+ trades, t-statistic above 2); short-term price direction is mostly
+noise, so expect "no evidence" for a long time, possibly for good.
+
+## 6. Event and latency data
 
 Every record carries timestamps for each stage. When a pool event triggered
 the quote, it also carries the market-change time. `npm run report` compares
@@ -101,7 +143,8 @@ is the honest measure of whether the bot is fast enough.
 
 ## What it does not learn
 
-- Nothing changes risk limits, trade caps, the mode or the go-live gate. Those
+- Nothing changes risk limits, trade caps, the mode or the go-live gate; the
+  price-direction predictions never trade real money. Those
   are settings, changed only by a person.
 - No profit target feeds back into risk: missing a target never makes the bot
   take bigger or riskier trades.

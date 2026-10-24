@@ -83,6 +83,7 @@ def build_opp_record(
     sol_price_usd: float,
     detected=None,
     ladder: list[dict] | None = None,
+    predicted: dict | None = None,
 ) -> dict:
     """
     Builds the funnel line for one acted-on candidate. `decision_ts` is when the
@@ -140,6 +141,8 @@ def build_opp_record(
         "simulated": simulated,
         "realized": realized,
         "expected": expected,
+        #: The gap predictor's view before acting: chance it holds at the re-check, and its size then.
+        "predicted": predicted,
         "costs": {
             "baseFeeUsd": lamports_usd(c.base_fee_lamports),
             "priorityFeeUsd": lamports_usd(c.priority_fee_lamports),
