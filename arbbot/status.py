@@ -190,7 +190,8 @@ def render_status(i: dict, now: int, color: bool) -> str:
             out.append(f"Hot:     {yellow(', '.join(live['hot']))} {dim('(sudden price moves)')}")
         out.append(
             f"Wallet:  ${to_fixed(live['walletValueUsd'], 2)}{dim(' (paper)') if live.get('mode') == 'paper' else ''}   "
-            f"trade size up to ${to_fixed(live['tradeSizeUsd'], 2)}   SOL ${to_fixed(live['solPrice'], 2)}"
+            f"trade size up to ${to_fixed(live['tradeSizeUsd'], 2)}{' ' + live['base'] if live.get('base') else ''}   "
+            f"SOL ${to_fixed(live['solPrice'], 2)}"
         )
 
     # --- test progress and the go-live gate -----------------------------------

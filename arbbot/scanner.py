@@ -47,6 +47,7 @@ async def scan_cycles(
     return sorted(results, key=lambda s: s.val.net_usd, reverse=True)
 
 
-async def fetch_sol_price_usd(jup) -> float:
-    q = await jup.quote(SOL_MINT, USDC_MINT, 1_000_000_000, 50)
+async def fetch_sol_price_usd(jup, base_mint: str = USDC_MINT) -> float:
+    """SOL's price in the base stablecoin (counted as dollars)."""
+    q = await jup.quote(SOL_MINT, base_mint, 1_000_000_000, 50)
     return int(q["outAmount"]) / 1e6

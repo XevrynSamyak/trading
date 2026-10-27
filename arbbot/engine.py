@@ -234,7 +234,7 @@ class Engine:
             min_ms_per_request=cfg.jupiter_ms_per_request,
             tokens_per_cycle=TOKENS_PER_SCAN,
         )
-        balance_cache = BalanceCache(rpc, owner) if owner else None
+        balance_cache = BalanceCache(rpc, owner, base_mint=cfg.base_mint) if owner else None
         # The opportunity funnel is the source of truth for learning; replay it at startup.
         funnel_path = os.path.join(cfg.data_dir, f"opps-{cfg.mode}.jsonl")
         funnel = Funnel(funnel_path)
@@ -350,7 +350,7 @@ class Engine:
             if ms > 0 and self.running:
                 await self.sleep(ms)
 
-        sol_price = await fetch_sol_price_usd(jup)
+        sol_price = await fetch_sol_price_usd(jup, cfg.base_mint)
         sol_price_at = now_ms()
         discovered_at = 0
         last_day = start_of_utc_day(now_ms())
@@ -382,6 +382,7 @@ class Engine:
             "state": "scanning",
             "onChainTesting": False,
             "sendVia": cfg.send_via,
+            "base": cfg.base_token,
             "solPrice": 0,
             "walletValueUsd": cfg.starting_balance_usd,
             "tradeSizeUsd": 0,
@@ -406,7 +407,7 @@ class Engine:
         else:
             how = "quote-only (add WALLET_PUBLIC_KEY for realistic on-chain testing; quoted amounts are not profit)"
         await notify(
-            f"Started in {cfg.mode.upper()} mode, {how}"
+            f"Started in {cfg.mode.upper()} mode, trading in {cfg.base_token}, {how}"
             + (f". Wallet {owner}" if owner else "")
             + f". Loss floor ${js_str(cfg.loss_floor_usd)}, no profit cap. SOL=${to_fixed(sol_price, 2)}"
         )
@@ -459,7 +460,7 @@ class Engine:
 
                 if now - sol_price_at > SOL_PRICE_REFRESH_MS:
                     await wait_for_jupiter(1)
-                    sol_price = await fetch_sol_price_usd(jup)
+                    sol_price = await fetch_sol_price_usd(jup, cfg.base_mint)
                     sol_price_at = now
 
                 records = ledger.all()
@@ -486,21 +487,25 @@ class Engine:
 
                 # Wallet value: real on-chain in micro/live; in paper, start + simulated P&L only.
                 paper_value = cfg.starting_balance_usd + sum(r["netUsd"] for r in money_records)
-                value_usd = usdc_usd = paper_value
+                # base_usd: the base stablecoin (USDC or USDT) the bot can trade with.
+                value_usd = base_usd = paper_value
                 simulate_as = None
                 if owner and balance_cache:
                     b = await balance_cache.get()
-                    real_usdc = b.usdc_atoms / 1e6
+                    real_base = b.base_atoms / 1e6
                     if is_real_money(cfg.mode):
                         value_usd = wallet_value_usd(b, sol_price)
-                        usdc_usd = real_usdc
-                    elif real_usdc >= 1 and b.lamports / 1e9 >= MIN_SOL_TO_SIMULATE:
+                        base_usd = real_base
+                    elif real_base >= 1 and b.lamports / 1e9 >= MIN_SOL_TO_SIMULATE:
                         # On-chain simulation can only spend what the wallet really holds.
-                        usdc_usd = min(paper_value, real_usdc)
+                        base_usd = min(paper_value, real_base)
                         simulate_as = owner
                     elif not warned_unfunded:
                         warned_unfunded = True
-                        log.warn(f"wallet needs at least $1 USDC and {MIN_SOL_TO_SIMULATE} SOL to test on-chain; quote-only until funded")
+                        log.warn(
+                            f"wallet needs at least $1 {cfg.base_token} and {MIN_SOL_TO_SIMULATE} SOL to test on-chain; "
+                            "quote-only until funded"
+                        )
 
                 decision = risk.check(value_usd, ledger.pnl_between(start_of_utc_day(now), records=records, bases=[money]), now)
                 publish(walletValueUsd=value_usd, onChainTesting=cfg.mode == "paper" and bool(simulate_as))
@@ -512,12 +517,13 @@ class Engine:
                     await self.sleep(cfg.scan_interval_ms * 4)
                     continue
 
-                size_usd = trade_size_usd(cfg, usdc_usd)
+                size_usd = trade_size_usd(cfg, base_usd)
                 if cfg.mode == "micro":
                     size_usd = min(size_usd, cfg.micro_max_trade_usd)
                 if size_usd < 1:
-                    publish(state="waiting", note=f"only ${to_fixed(usdc_usd, 2)} USDC available", nextScanInMs=cfg.scan_interval_ms * 4)
-                    log.info(f"only ${to_fixed(usdc_usd, 2)} USDC available; waiting")
+                    note = f"only ${to_fixed(base_usd, 2)} {cfg.base_token} available"
+                    publish(state="waiting", note=note, nextScanInMs=cfg.scan_interval_ms * 4)
+                    log.info(f"{note}; waiting")
                     await self.sleep(cfg.scan_interval_ms * 4)
                     continue
 
@@ -606,7 +612,7 @@ class Engine:
                     # Every few full scans: triangles through the pivot, among configured tokens it may act on.
                     if cfg.triangles and full_scans % cfg.triangle_every == 0:
                         liquid = {s: m for s, m in scannable.items() if s in cfg.tokens and can_act(safety_of(s, m).state, cfg.mode)}
-                        triangles = triangle_turns.take(triangle_specs(liquid, cfg.triangle_pivot), TRIANGLES_PER_SCAN)
+                        triangles = triangle_turns.take(triangle_specs(liquid, cfg.triangle_pivot, cfg.base_mint), TRIANGLES_PER_SCAN)
                     if not triangles:
                         tokens = brain.pick_tokens(scannable, bonus=gap_predictor.token_bonus())
                     for s, ts in dirty:
@@ -616,7 +622,7 @@ class Engine:
                     if s in tokens:
                         market_ts[s] = ts
                 scan_times.append(now_ms())
-                specs = triangles or [two_leg_spec(s, m) for s, m in tokens.items()]
+                specs = triangles or [two_leg_spec(s, m, cfg.base_mint) for s, m in tokens.items()]
                 buckets: dict[str, float] = {}
 
                 def size_for(spec) -> int:

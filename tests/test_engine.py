@@ -8,7 +8,7 @@ import httpx
 import pytest
 
 from arbbot import engine as engine_mod
-from arbbot.config import USDC_MINT, load_config
+from arbbot.config import USDC_MINT, USDT_MINT, load_config
 from arbbot.engine import EXIT_REFUSED, Engine
 from arbbot.killswitch import disable_trading
 from arbbot.solana.keys import Keypair
@@ -17,7 +17,7 @@ GAP = Keypair.generate().public_key
 FLAT = Keypair.generate().public_key
 
 
-def handler(seen: list):
+def handler(seen: list, base: str = USDC_MINT):
     def handle(req: httpx.Request) -> httpx.Response:
         if req.url.host == "jup.mock" and req.url.path.endswith("/price/v3"):
             seen.append(("price",))
@@ -28,7 +28,7 @@ def handler(seen: list):
             p = req.url.params
             amount = int(p["amount"])
             seen.append(("quote", p["inputMint"], p["outputMint"]))
-            if p["inputMint"] == USDC_MINT:
+            if p["inputMint"] == base:
                 out = amount * 2
             elif p["inputMint"] == GAP:
                 out = amount * 101 // 200  # a 1% gap
@@ -63,7 +63,8 @@ def config(tmp_path, **extra):
 
 def run_engine(cfg, monkeypatch, until, timeout_s=10.0):
     seen: list = []
-    monkeypatch.setattr(engine_mod, "make_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler(seen))))
+    monkeypatch.setattr(engine_mod, "make_client",
+                        lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler(seen, cfg.base_mint))))
 
     async def go():
         e = Engine(cfg)
@@ -106,6 +107,20 @@ def test_paper_quote_only_acts_on_gap_records_everything_and_never_builds(tmp_pa
     brain = json.load(open(tmp_path / "brain-paper.json"))
     assert brain["totalScans"] > 0 and "GAP" in brain["tokens"]
     assert json.load(open(tmp_path / "token-safety.json"))[GAP]["chain"]["program"] == "spl-token"
+
+
+def test_trades_in_usdt_when_asked(tmp_path, monkeypatch):
+    cfg = config(tmp_path, BASE_TOKEN="USDT")
+    opps_path = tmp_path / "opps-paper.jsonl"
+    code, seen = run_engine(cfg, monkeypatch, lambda: len(read_jsonl(opps_path)) >= 1)
+    assert code == 0
+    quotes = [s for s in seen if s[0] == "quote"]
+    # The SOL price is in USDT, and every round trip starts and ends in USDT, never USDC.
+    assert quotes[0][2] == USDT_MINT
+    assert all(USDC_MINT not in s[1:] for s in quotes)
+    assert any(s[1] == USDT_MINT and s[2] == GAP for s in quotes) and any(s[1] == GAP and s[2] == USDT_MINT for s in quotes)
+    assert read_jsonl(opps_path)[0]["symbol"] == "GAP"
+    assert json.load(open(tmp_path / "status.json"))["base"] == "USDT"
 
 
 def test_kill_switch_stops_trading_until_reenabled(tmp_path, monkeypatch):

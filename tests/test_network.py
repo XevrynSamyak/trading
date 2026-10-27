@@ -14,7 +14,7 @@ from arbbot.solana.keys import Keypair, associated_token_address
 from arbbot.solana.rpc import Rpc, RpcError
 from arbbot.solana.ws import RpcWebSocket, ws_url_from
 from arbbot.wallet import BalanceCache, get_balances, token_amount_from_data, wallet_value_usd
-from arbbot.config import USDC_MINT
+from arbbot.config import USDC_MINT, USDT_MINT
 
 
 def run(coro):
@@ -133,7 +133,8 @@ def test_rpc_calls_and_errors():
             return httpx.Response(200, json={"result": {"context": {"slot": 1}, "value": 50_000_000}})
         if m == "getTokenAccountsByOwner":
             acc = lambda mint, amt: {"pubkey": "x", "account": {"lamports": 2_039_280, "data": {"parsed": {"info": {"mint": mint, "tokenAmount": {"amount": amt}}}}}}  # noqa: E731
-            return httpx.Response(200, json={"result": {"value": [acc(USDC_MINT, "25000000"), acc("Other", "5")]}})
+            return httpx.Response(200, json={"result": {"value": [acc(USDC_MINT, "25000000"), acc("Other", "5"),
+                                                                  acc(USDT_MINT, "3000000")]}})
         if m == "sendTransaction":
             return httpx.Response(200, json={"error": {"code": -32002, "message": "Transaction simulation failed"}})
         if m == "getAccountInfo":
@@ -145,6 +146,7 @@ def test_rpc_calls_and_errors():
         async with make_client(transport=httpx.MockTransport(handler)) as c:
             rpc = Rpc("https://rpc", c)
             b = await get_balances(rpc, owner)
+            usdt = await get_balances(rpc, owner, USDT_MINT)
             with pytest.raises(RpcError, match="simulation failed"):
                 await rpc.send_transaction(b"\0")
             with pytest.raises(RuntimeError, match="RPC getSlot 500"):
@@ -155,11 +157,14 @@ def test_rpc_calls_and_errors():
             await cache.get(30_000)
             n = len(seen)
             await cache.get(60_000)
-            return b, table, len(seen) - n
+            return b, usdt, table, len(seen) - n
 
-    b, table, refreshed = run(go())
-    assert (b.lamports, b.usdc_atoms, b.rent_lamports) == (50_000_000, 25_000_000, 4_078_560)
-    assert wallet_value_usd(b, 100) == pytest.approx(25 + 0.05407856 * 100)
+    b, usdt, table, refreshed = run(go())
+    assert (b.lamports, b.base_atoms, b.rent_lamports, b.other_stable_atoms) == (50_000_000, 25_000_000, 6_117_840, 3_000_000)
+    # Both stablecoins count toward the wallet's value; only the base is traded.
+    assert wallet_value_usd(b, 100) == pytest.approx(28 + 0.05611784 * 100)
+    assert (usdt.base_atoms, usdt.other_stable_atoms) == (3_000_000, 25_000_000)
+    assert wallet_value_usd(usdt, 100) == pytest.approx(wallet_value_usd(b, 100))
     assert len(table.addresses) == 1
     assert refreshed == 2  # cache refreshed after a minute (balance + token accounts)
     assert token_amount_from_data(bytes(64) + (123).to_bytes(8, "little")) == 123

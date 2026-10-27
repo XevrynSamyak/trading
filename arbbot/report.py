@@ -48,6 +48,8 @@ class ReportData:
     gap_predict: dict | None = None
     #: Price-direction predictions, paper only: {"status": Trend.status(), "thoughts": [...], "evidence": str}.
     trend: dict | None = None
+    #: The stablecoin trades start and end in.
+    base: str = "USDC"
 
 
 def _median(xs: list[float]) -> float | None:
@@ -119,7 +121,7 @@ def render_report(d: ReportData) -> str:
 
     line = "=" * 48
     out = [line, "            ARBITRAGE BOT REPORT", line, ""]
-    out.append(f"Mode now:                     {d.mode_now.upper()}")
+    out.append(f"Mode now:                     {d.mode_now.upper()}, trading in {d.base}")
     out.append(f"Scanned round trips:          {d.scans:,}")
     out.append(f"Candidates acted on:          {len(o):,}")
     out.append(f"  still there at re-quote:    {executable}  ({_pct(executable, len(o))})")
@@ -391,6 +393,7 @@ def build_report_data(cfg, now: int | None = None) -> ReportData:
         brain_summary=brain.summary(),
         gap_predict=gaps.summary(),
         trend={"status": trend.status(), "thoughts": trend.thoughts(), "evidence": trend.evidence()} if trend else None,
+        base=cfg.base_token,
     )
 
 

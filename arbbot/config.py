@@ -8,6 +8,11 @@ from .secret_checks import signing_key_from
 
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 USDC_DECIMALS = 6
+USDT_MINT = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
+#: Dollar stablecoins the bot can hold and trade from (BASE_TOKEN). Both have 6
+#: decimals; 1 unit is counted as $1.
+BASE_TOKENS = {"USDC": USDC_MINT, "USDT": USDT_MINT}
+STABLE_MINTS = set(BASE_TOKENS.values())
 SOL_MINT = "So11111111111111111111111111111111111111112"
 
 #: Liquid tokens worth scanning by default. Override with TOKENS=SYMBOL:mint,...
@@ -21,7 +26,7 @@ DEFAULT_TOKENS: dict[str, str] = {
     # Pegged tokens: a dollar stablecoin and liquid-staking SOL. They cost very
     # little to trade, so a small mispricing between venues can clear the costs
     # (and SOL triangles through them catch staking-token vs SOL gaps).
-    "USDT": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+    "USDT": USDT_MINT,
     "JITOSOL": "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn",
     "MSOL": "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So",
     "JUPSOL": "jupSoLaHXQiZZTSfEWMTRRgpnyFm8f6sZdosWBjx93v",
@@ -207,6 +212,9 @@ class Config:
     trend_enter_prob: float
     trend_max_positions: int
     trend_stop_pct: float
+    #: The stablecoin every trade starts and ends in ("USDC" or "USDT"), and its mint.
+    base_token: str
+    base_mint: str
     status_http_port: int | None
     status_http_host: str
     status_http_token: str | None
@@ -241,6 +249,16 @@ def load_config(env: dict | None = None) -> Config:
         if math.isfinite(v) and v > 0:
             ladder.append(int(v) if v.is_integer() else v)
     floor_default = round(starting * n("LOSS_FLOOR_PCT", 0.7), 2)
+    base_token = (env.get("BASE_TOKEN") or "USDC").strip().upper()
+    if base_token not in BASE_TOKENS:
+        raise ValueError(f"BASE_TOKEN must be USDC or USDT, got {base_token}")
+    base_mint = BASE_TOKENS[base_token]
+    tokens = parse_pairs(env.get("TOKENS")) if env.get("TOKENS") else dict(DEFAULT_TOKENS)
+    if base_token != "USDC" and not env.get("TOKENS"):
+        # The other dollar stablecoin takes the base's place in the pegged list.
+        tokens = {("USDC" if m == base_mint else s): (USDC_MINT if m == base_mint else m) for s, m in tokens.items()}
+    # A round trip from the base back to itself is no trade.
+    tokens = {s: m for s, m in tokens.items() if m != base_mint}
 
     cfg = Config(
         mode=mode,
@@ -266,8 +284,8 @@ def load_config(env: dict | None = None) -> Config:
         max_price_impact_bps=n("MAX_PRICE_IMPACT_BPS", 100),
         size_ladder_usd=sorted(ladder),
         max_ladder_points=max(1, int(n("MAX_LADDER_POINTS", 4))),
-        tokens=parse_pairs(env.get("TOKENS")) if env.get("TOKENS") else dict(DEFAULT_TOKENS),
-        # Maximum capital exposure per trade (share of USDC on hand). TRADE_SIZE_PCT is the older name.
+        tokens=tokens,
+        # Maximum capital exposure per trade (share of the base stablecoin on hand). TRADE_SIZE_PCT is the older name.
         trade_size_pct=_num(env, "MAX_EXPOSURE_PCT", n("TRADE_SIZE_PCT", 0.8)),
         max_trade_usd=n("MAX_TRADE_USD", 0),
         min_profit_bps=n("MIN_PROFIT_BPS", 20),
@@ -321,6 +339,8 @@ def load_config(env: dict | None = None) -> Config:
         trend_enter_prob=n("TREND_ENTER_PROB", 0.6),
         trend_max_positions=max(0, int(n("TREND_MAX_POSITIONS", 3))),
         trend_stop_pct=n("TREND_STOP_PCT", 1.5),
+        base_token=base_token,
+        base_mint=base_mint,
         status_http_port=int(n("STATUS_HTTP_PORT", 0)) if env.get("STATUS_HTTP_PORT") else None,
         status_http_host=env.get("STATUS_HTTP_HOST") or "127.0.0.1",
         status_http_token=env.get("STATUS_HTTP_TOKEN") or None,
@@ -346,7 +366,7 @@ def load_config(env: dict | None = None) -> Config:
 
 def trade_size_usd(cfg: Config, usdc_balance_usd: float) -> float:
     """
-    USD to put into the next trade: a share of the USDC on hand (compounding),
+    USD to put into the next trade: a share of the base stablecoin on hand (compounding),
     optionally capped. Both legs settle in one atomic transaction, so the
     position is never left half-open.
     """

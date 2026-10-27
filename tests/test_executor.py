@@ -4,7 +4,7 @@ import base64
 import httpx
 import pytest
 
-from arbbot.config import USDC_MINT, load_config
+from arbbot.config import USDC_MINT, USDT_MINT, load_config
 from arbbot.costs import CostSettings, value_cycle
 from arbbot.cycle import Cycle, triangle_spec, two_leg_spec
 from arbbot.executor import (
@@ -20,7 +20,7 @@ from arbbot.solana import ed25519
 from arbbot.solana.base58 import b58decode
 from arbbot.solana.keys import SYSTEM_PROGRAM_ID, Keypair
 from arbbot.solana.rpc import RpcError
-from arbbot.wallet import usdc_ata
+from arbbot.wallet import base_ata
 
 SOL_PRICE = 120
 TOKEN = Keypair.generate().public_key
@@ -58,14 +58,15 @@ def candidate(spec=None):
 class FakeJup:
     """Every quote returns 10.1 units; records each quote request."""
 
-    def __init__(self, last_leg_threshold=None):
+    def __init__(self, last_leg_threshold=None, base=USDC_MINT):
         self.quotes = []
         self.threshold = last_leg_threshold
+        self.base = base
 
     async def quote(self, inp, out, amount, slippage_bps, max_accounts=None):
         self.quotes.append((inp, out, slippage_bps))
         o = 10_100_000
-        floor = self.threshold if out == USDC_MINT and self.threshold is not None else o * (10_000 - slippage_bps) // 10_000
+        floor = self.threshold if out == self.base and self.threshold is not None else o * (10_000 - slippage_bps) // 10_000
         return quote(inp, out, amount, o, floor)
 
     async def swap_instructions(self, q, user):
@@ -81,11 +82,12 @@ def token_account_data(amount: int) -> str:
 
 class FakeRpc:
     def __init__(self, usdc_before, usdc_after, lamports_before=0, lamports_after=0, lands=True, sim_err=None,
-                 hangs=False, land_err=None, status_errors=0, after_read_fails=False):
+                 hangs=False, land_err=None, status_errors=0, after_read_fails=False, base=USDC_MINT):
         self.__dict__.update(locals())
         self.landed = False
         self.status_calls = 0
         self.simulated = []
+        self.balance_reads = []
 
     async def get_address_lookup_table(self, key):
         return None
@@ -94,6 +96,7 @@ class FakeRpc:
         return Keypair.generate().public_key, 100
 
     async def get_token_account_balance(self, address, commitment="processed"):
+        self.balance_reads.append(address)
         return self.usdc_before
 
     async def simulate_transaction(self, tx, **kw):
@@ -107,7 +110,7 @@ class FakeRpc:
         if self.landed and self.after_read_fails:
             raise RuntimeError("fetch failed")
         amount = str(self.usdc_after if self.landed else self.usdc_before)
-        usdc = {"account": {"lamports": 2_039_280, "data": {"parsed": {"info": {"mint": USDC_MINT, "tokenAmount": {"amount": amount}}}}}}
+        usdc = {"account": {"lamports": 2_039_280, "data": {"parsed": {"info": {"mint": self.base, "tokenAmount": {"amount": amount}}}}}}
         # After landing, a new token account holds a refundable deposit.
         other = {"account": {"lamports": 2_039_280, "data": {"parsed": {"info": {"mint": TOKEN, "tokenAmount": {"amount": "0"}}}}}}
         return [usdc, other] if self.landed else [usdc]
@@ -191,9 +194,19 @@ def test_stale_when_the_gap_is_gone_at_the_fresh_requote():
     assert r.status == "stale" and "gap gone at fresh re-quote" in r.reason and r.executable is not None
 
 
-def test_usdc_account_is_a_program_address():
-    a = usdc_ata(OWNER)
-    assert a == usdc_ata(OWNER) and not ed25519.is_on_curve(b58decode(a))
+def test_stablecoin_accounts_are_program_addresses():
+    a, t = base_ata(OWNER), base_ata(OWNER, USDT_MINT)
+    assert a == base_ata(OWNER, USDC_MINT) and not ed25519.is_on_curve(b58decode(a))
+    assert t != a and not ed25519.is_on_curve(b58decode(t))
+
+
+def test_trading_in_usdt_quotes_simulates_and_measures_in_usdt():
+    jup = FakeJup(base=USDT_MINT)
+    rpc = FakeRpc(20_000_000, 20_100_000, base=USDT_MINT)
+    r = run(simulate_execute(*candidate(two_leg_spec("TKN", TOKEN, USDT_MINT)), OWNER, deps(rpc, jup)))
+    assert r.status == "filled" and r.net_usd == pytest.approx(0.1 - NETWORK_USD, abs=1e-9)
+    assert [(a, b) for a, b, _ in jup.quotes] == [(USDT_MINT, TOKEN), (TOKEN, USDT_MINT)]
+    assert rpc.balance_reads == [base_ata(OWNER, USDT_MINT)]  # the USDT account, not USDC's
 
 
 def test_quote_only_is_labelled_unverified():
@@ -253,6 +266,14 @@ def test_a_triangle_goes_in_one_transaction():
     r = run(live_execute(*candidate(triangle_spec(("AAA", TOKEN), ("BBB", TOKEN_B))), WALLET, deps(rpc, jup, jito=jito)))
     assert r.status == "filled" and len(jup.quotes) == 3
     assert _programs(jito.sent[0])[0].count(DEX) == 3
+
+
+def test_real_trades_in_usdt_measure_the_usdt_balance():
+    rpc = FakeRpc(20_000_000, 20_100_000, 50_000_000, 50_000_000 - 16_000 - 2_039_280, base=USDT_MINT)
+    spec = two_leg_spec("TKN", TOKEN, USDT_MINT)
+    r = run(live_execute(*candidate(spec), WALLET, deps(rpc, FakeJup(base=USDT_MINT), jito=FakeJito())))
+    assert r.status == "filled"
+    assert r.net_usd == pytest.approx(0.1 - (16_000 / 1e9) * SOL_PRICE, abs=1e-9)
 
 
 def test_never_sends_when_the_free_simulation_says_revert():

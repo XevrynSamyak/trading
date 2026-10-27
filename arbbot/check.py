@@ -26,7 +26,7 @@ def mask_url(url: str) -> str:
 
 def limits_line(cfg) -> str:
     """The loss-side limits in one line (there is no profit cap)."""
-    caps = [f"{js_round(cfg.trade_size_pct * 100)}% of the USDC on hand"]
+    caps = [f"{js_round(cfg.trade_size_pct * 100)}% of the {getattr(cfg, 'base_token', 'USDC')} on hand"]
     if cfg.max_trade_usd > 0:
         caps.append(f"${js_str(cfg.max_trade_usd)} (MAX_TRADE_USD)")
     if cfg.mode == "micro":
@@ -55,7 +55,7 @@ async def _main(cfg) -> bool:
     from .solana.ws import RpcWebSocket, ws_url_from
     from .wallet import get_balances, load_keypair, wallet_value_usd
 
-    print(f"Mode: {cfg.mode}{'  (REAL MONEY)' if is_real_money(cfg.mode) else '  (nothing is ever sent)'}")
+    print(f"Mode: {cfg.mode}{'  (REAL MONEY)' if is_real_money(cfg.mode) else '  (nothing is ever sent)'}, trading in {cfg.base_token}")
     print(f"RPC:  {mask_url(cfg.rpc_url)}\n")
 
     secrets = check_secrets(dict(os.environ), cfg.mode, ".env")
@@ -78,7 +78,7 @@ async def _main(cfg) -> bool:
         async def jupiter_step():
             nonlocal sol_price
             try:
-                sol_price = await fetch_sol_price_usd(jup)
+                sol_price = await fetch_sol_price_usd(jup, cfg.base_mint)
             except Exception as err:
                 if cfg.jupiter_api_key and re.search(r"Jupiter quote (401|403)", str(err)):
                     raise RuntimeError(
@@ -96,18 +96,21 @@ async def _main(cfg) -> bool:
         owner = cfg.wallet_public_key or (load_keypair(cfg.signing_key).public_key if cfg.signing_key else None)
         if owner:
             async def wallet_step():
-                b = await get_balances(rpc, owner)
-                sol, usdc = b.lamports / 1e9, b.usdc_atoms / 1e6
+                b = await get_balances(rpc, owner, cfg.base_mint)
+                sol, base = b.lamports / 1e9, b.base_atoms / 1e6
+                other = "USDT" if cfg.base_token == "USDC" else "USDC"
                 if sol < MIN_SOL_FOR_FEES:
                     warn = " (WARNING: add some SOL, it pays the network fees)"
-                elif usdc < 1:
-                    warn = " (WARNING: add USDC, the bot trades with it)"
+                elif base < 1:
+                    warn = f" (WARNING: add {cfg.base_token}, the bot trades with it"
+                    warn += f"; or set BASE_TOKEN={other} to trade the {other} you hold)" if b.other_stable_atoms >= 1e6 else ")"
                 elif cfg.mode == "paper":
                     warn = " -> paper trades will be tested on-chain"
                 else:
                     warn = ""
+                held = f", {other} {to_fixed(b.other_stable_atoms / 1e6, 2)} (not traded)" if b.other_stable_atoms else ""
                 total = f", total ~${to_fixed(wallet_value_usd(b, sol_price), 2)}" if sol_price else ""
-                return f"{owner}  SOL {to_fixed(sol, 4)}, USDC {to_fixed(usdc, 2)}{total}{warn}"
+                return f"{owner}  SOL {to_fixed(sol, 4)}, {cfg.base_token} {to_fixed(base, 2)}{held}{total}{warn}"
 
             results.append(await _step("Wallet", wallet_step))
         else:

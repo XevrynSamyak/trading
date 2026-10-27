@@ -94,6 +94,7 @@ trade on the real chain (nothing is sent, no secret key needed):
 
 1. In Phantom (or Solflare), **create a new wallet/account** just for the bot.
 2. Send it the bot's money: about $20 of USDC plus ~$3 of SOL (network fees, plus a refundable ~0.002 SOL deposit the first time it trades each token).
+   Prefer USDT? Send USDT (on Solana) instead and put `BASE_TOKEN=USDT` in `.env`: the bot then trades in USDT.
 3. Copy that account's **public address** (starts with a letter/number,
    ~44 characters) and put it in `.env`:
    ```

@@ -18,6 +18,11 @@ paper mode, and it stops on its own before losing more than you allow.
  fresh Solana wallet ($20–30 USDC + ~$3 SOL for fees) ◀──▶ bot trades
 ```
 
+- **USDC or USDT:** the bot trades in USDC by default. With `BASE_TOKEN=USDT`
+  in `.env` it holds and trades USDT instead: every trade starts and ends in
+  USDT and profit is counted in it (1 USDT counted as $1). The other
+  stablecoin, if the wallet holds some, is counted in its value but not
+  traded.
 - **The bot never holds bank or card details.** Put a prepaid or virtual
   card with a hard spending limit (Revolut virtual card, Privacy.com, etc.)
   on autopay with the providers. If the server is ever hacked, your bank is

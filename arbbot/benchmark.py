@@ -55,8 +55,10 @@ class BenchOptions:
     #: Spacing between Jupiter requests (stay inside the rate limit).
     jupiter_gap_ms: float
     watch_ms: float
-    #: USDC amount for test quotes (atoms).
+    #: Base stablecoin amount for test quotes (atoms).
     amount_atoms: int
+    #: The stablecoin the bot trades in (USDC or USDT).
+    base_mint: str = USDC_MINT
 
 
 async def _sample(n: int, fn, now, sleep, gap_ms: float = 0) -> dict:
@@ -92,7 +94,7 @@ async def run_benchmark(d: BenchDeps, o: BenchOptions, progress: Callable[[str],
 
         async def one_leg():
             nonlocal last_quote
-            last_quote = await quote(USDC_MINT, SOL_MINT, o.amount_atoms)
+            last_quote = await quote(o.base_mint, SOL_MINT, o.amount_atoms)
 
         quote_leg = await _sample(o.quote_samples, one_leg, d.now, d.sleep, o.jupiter_gap_ms)
         say("Jupiter quote (one leg)", quote_leg)
@@ -100,8 +102,8 @@ async def run_benchmark(d: BenchDeps, o: BenchOptions, progress: Callable[[str],
         await d.sleep(o.jupiter_gap_ms)
 
         async def round_trip():
-            buy = await quote(USDC_MINT, SOL_MINT, o.amount_atoms)
-            await quote(SOL_MINT, USDC_MINT, int(buy["outAmount"]))
+            buy = await quote(o.base_mint, SOL_MINT, o.amount_atoms)
+            await quote(SOL_MINT, o.base_mint, int(buy["outAmount"]))
 
         quote_round_trip = await _sample(max(1, math.ceil(o.quote_samples / 2)), round_trip, d.now, d.sleep, o.jupiter_gap_ms * 2)
         say("Jupiter round trip (2 legs)", quote_round_trip)
@@ -129,7 +131,7 @@ async def run_benchmark(d: BenchDeps, o: BenchOptions, progress: Callable[[str],
     route = (last_quote or {}).get("routePlan") or []
     account = (route[0].get("swapInfo") or {}).get("ammKey") if route else None
     if d.watch_account and account:
-        progress(f"Watching the SOL/USDC pool Jupiter routed through, for {js_round(o.watch_ms / 1000)}s...")
+        progress(f"Watching the SOL pool Jupiter routed through, for {js_round(o.watch_ms / 1000)}s...")
         try:
             events, first = await d.watch_account(account, o.watch_ms)
             seconds = o.watch_ms / 1000
@@ -170,16 +172,16 @@ def explain(r: dict) -> list[str]:
     if p:
         if p["events"] == 0:
             out.append(
-                f"No updates arrived for the SOL/USDC pool in {p['seconds']}s: it was quiet, or the WebSocket is blocked "
+                f"No updates arrived for the SOL pool in {p['seconds']}s: it was quiet, or the WebSocket is blocked "
                 "(then event triggers can't work here; EVENT_TRIGGERS=off saves the connection)."
             )
         elif p["perMin"] > 30:
             out.append(
-                f"The SOL/USDC pool changed ~{to_fixed(p['perMin'], 0)} times a minute: too busy to be a useful trigger "
+                f"The SOL pool changed ~{to_fixed(p['perMin'], 0)} times a minute: too busy to be a useful trigger "
                 "(the bot rests pools like this)."
             )
         else:
-            out.append(f"The SOL/USDC pool changed ~{to_fixed(p['perMin'], 0)} times a minute.")
+            out.append(f"The SOL pool changed ~{to_fixed(p['perMin'], 0)} times a minute.")
     if r.get("slotsPerSec") is not None and r["slotsPerSec"] < 1:
         out.append("The WebSocket delivered few or no new-block notices: event triggers will not work well over this connection.")
     return out
@@ -234,7 +236,7 @@ async def _main(cfg) -> None:
                 ),
                 # Twice the bot's own spacing, so a running bot and the benchmark together stay under the limit.
                 BenchOptions(rpc_samples=10, quote_samples=6, jupiter_gap_ms=jupiter_ms_per_request(cfg.jupiter_rpm) * 2,
-                             watch_ms=20_000, amount_atoms=20_000_000),
+                             watch_ms=20_000, amount_atoms=20_000_000, base_mint=cfg.base_mint),
                 print,
             )
         finally:

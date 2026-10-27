@@ -29,7 +29,7 @@ from .profit import BASE_FEE_LAMPORTS, lamports_to_usd, required_out_atoms, slip
 from .solana.keys import Keypair
 from .solana.rpc import RpcError
 from .solana.tx import AccountMeta, Instruction, MessageV0, VersionedTransaction, set_compute_unit_limit, set_compute_unit_price, transfer
-from .wallet import get_balances, token_amount_from_data, usdc_ata
+from .wallet import base_ata, get_balances, token_amount_from_data
 
 
 @dataclass
@@ -75,7 +75,7 @@ class ExecDeps:
 
 @dataclass
 class FloorPlan:
-    #: Minimum USDC (atoms) the last leg must return on-chain: input + network costs + min profit.
+    #: Minimum base stablecoin (atoms) the last leg must return on-chain: input + network costs + min profit.
     required: int
     #: Slippage on the last leg's quote that puts its on-chain minimum at (or above) `required`.
     slippage_bps: int
@@ -210,11 +210,13 @@ async def simulate_execute(candidate: Cycle, val: Valuation, owner: str, deps: E
     if isinstance(built, ExecResult):
         return replace(built, t=t, executable=fv)
     t["built"] = deps.now()
-    ata = usdc_ata(owner)
+    # The cycle starts and ends in the base stablecoin (USDC or USDT): its balance change is the result.
+    ata = base_ata(owner, cycle.path[0])
     try:
         pre = await deps.rpc.get_token_account_balance(ata, "processed")
     except Exception:
-        return ExecResult("skipped", t=t, executable=fv, reason="wallet has no USDC account to simulate with")
+        base = getattr(deps.cfg, "base_token", "USDC")
+        return ExecResult("skipped", t=t, executable=fv, reason=f"wallet has no {base} account to simulate with")
     sim = await deps.rpc.simulate_transaction(built.tx.serialize(), replace_recent_blockhash=True, commitment="processed",
                                               account_addresses=[ata])
     if sim.get("err"):
@@ -294,7 +296,8 @@ async def live_execute(candidate: Cycle, val: Valuation, wallet: Keypair, deps: 
         return ExecResult("rejected", t=t, executable=fv, failed_leg=leg, verified=True,
                           reason=f"would revert: {_short_err(sim['err'])}{_leg_note(leg, n)}")
 
-    before = await get_balances(deps.rpc, wallet.public_key)
+    base_mint = cycle.path[0]  # USDC or USDT: what the cycle starts and ends in
+    before = await get_balances(deps.rpc, wallet.public_key, base_mint)
     # The signature is known before sending, so landing can be checked even if the send call fails.
     signature = built.tx.signature
     send_error = None
@@ -320,7 +323,7 @@ async def live_execute(candidate: Cycle, val: Valuation, wallet: Keypair, deps: 
     t["landed"] = deps.now()
 
     try:
-        after = await _read_with_retry(lambda: get_balances(deps.rpc, wallet.public_key), deps)
+        after = await _read_with_retry(lambda: get_balances(deps.rpc, wallet.public_key, base_mint), deps)
         # Fee from the transaction itself (+ tip). A balance diff would wrongly count the
         # refundable deposit for a newly opened token account as a loss.
         info = await _read_with_retry(lambda: deps.rpc.get_transaction(signature), deps)
@@ -334,7 +337,7 @@ async def live_execute(candidate: Cycle, val: Valuation, wallet: Keypair, deps: 
         fv.costs.tip_lamports if cfg.send_via == "jito" else 0
     )
     fee_usd = lamports_to_usd(network, deps.sol_price_usd)
-    net = usdc_atoms_to_usd(after.usdc_atoms - before.usdc_atoms) - fee_usd
+    net = usdc_atoms_to_usd(after.base_atoms - before.base_atoms) - fee_usd
     if landing.get("err"):
         leg = failed_leg_of(landing["err"], built.leg_ranges)
         return ExecResult("failed", net, fee_usd, signature=signature, executable=fv, failed_leg=leg, verified=True,

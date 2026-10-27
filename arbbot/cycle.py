@@ -1,6 +1,7 @@
 """
-An arbitrage cycle: start in USDC, trade through one or more tokens, end in
-USDC, all legs in ONE atomic transaction.
+An arbitrage cycle: start in the base stablecoin (USDC, or USDT with
+BASE_TOKEN=USDT), trade through one or more tokens, end in the base, all legs
+in ONE atomic transaction.
   two-leg:  USDC -> X -> USDC
   triangle: USDC -> A -> B -> USDC
 Jupiter picks the best venue mix (Raydium, Orca, Meteora, ...) for each leg,
@@ -50,12 +51,12 @@ class Cycle(CycleSpec):
     market_ts: int | None = None
 
 
-def two_leg_spec(symbol: str, mint: str) -> CycleSpec:
-    return CycleSpec("two-leg", symbol, [symbol], [USDC_MINT, mint, USDC_MINT])
+def two_leg_spec(symbol: str, mint: str, base: str = USDC_MINT) -> CycleSpec:
+    return CycleSpec("two-leg", symbol, [symbol], [base, mint, base])
 
 
-def triangle_spec(a: tuple[str, str], b: tuple[str, str]) -> CycleSpec:
-    return CycleSpec("triangle", f"{a[0]}>{b[0]}", [a[0], b[0]], [USDC_MINT, a[1], b[1], USDC_MINT])
+def triangle_spec(a: tuple[str, str], b: tuple[str, str], base: str = USDC_MINT) -> CycleSpec:
+    return CycleSpec("triangle", f"{a[0]}>{b[0]}", [a[0], b[0]], [base, a[1], b[1], base])
 
 
 def spec_of(c: CycleSpec) -> CycleSpec:

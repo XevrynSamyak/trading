@@ -7,10 +7,11 @@ matter when the best route for each leg alone is not the best cycle. Each
 costs 3 quotes, so only a few run per scan, in turn.
 """
 
+from .config import USDC_MINT
 from .cycle import CycleSpec, triangle_spec
 
 
-def triangle_specs(tokens: dict[str, str], pivot: str) -> list[CycleSpec]:
+def triangle_specs(tokens: dict[str, str], pivot: str, base: str = USDC_MINT) -> list[CycleSpec]:
     pivot_mint = tokens.get(pivot)
     if not pivot_mint:
         return []
@@ -18,7 +19,7 @@ def triangle_specs(tokens: dict[str, str], pivot: str) -> list[CycleSpec]:
     for sym, mint in tokens.items():
         if sym == pivot or mint == pivot_mint:
             continue
-        out += [triangle_spec((pivot, pivot_mint), (sym, mint)), triangle_spec((sym, mint), (pivot, pivot_mint))]
+        out += [triangle_spec((pivot, pivot_mint), (sym, mint), base), triangle_spec((sym, mint), (pivot, pivot_mint), base)]
     return out
 
 
